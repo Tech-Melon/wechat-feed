@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <title>微信群信息流</title>
+    <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/assets/app.css?v=0.7.1" />
+  </head>
+  <body>
+    <header class="top">
+      <div class="brand">
+        <span class="mark">群</span>
+        <div>
+          <strong>微信群信息流</strong>
+          <p>本机只读 · 群消息实时卡片</p>
+        </div>
+      </div>
+      <label class="search">
+        <input id="query" type="search" placeholder="搜索已加载的发言、群或合约" />
+      </label>
+      <div class="mode" role="tablist">
+        <button id="mode-all" type="button" class="active">全部消息</button>
+        <button id="mode-ca" type="button">只看 CA</button>
+      </div>
+      <div id="runtime" class="runtime">正在连接</div>
+      <nav class="author">
+        <a href="https://x.com/0xTechMelon" target="_blank" rel="noreferrer">𝕏 @0xTechMelon</a>
+        <a href="https://docs.jishugua.top" target="_blank" rel="noreferrer">产品导航</a>
+      </nav>
+    </header>
+
+    <section class="paths">
+      <div class="path on">
+        <div class="path-top">
+          <span class="path-index">通路一</span>
+          <strong>本地页面</strong>
+        </div>
+        <p>当前就是这条通路。点名字/群名可备注，点星星可标关注用户。</p>
+      </div>
+      <div class="path">
+        <div class="path-top">
+          <span class="path-index">通路二</span>
+          <strong>浏览器插件</strong>
+        </div>
+        <label class="toggle"><input id="gmgn" type="checkbox" /> 插入 gmgn 推特信息流</label>
+        <label class="toggle"><input id="float-panel" type="checkbox" /> 白名单网页浮窗（可拖拽缩放，网址在插件弹窗里设置）</label>
+        <p>默认关闭。打开后使用本页已保存的备注、星标和群配置。</p>
+      </div>
+    </section>
+
+    <section class="keybar">
+      <label>GMGN OpenAPI Key
+        <input id="gmgn-key" type="password" placeholder="gmgn_ 开头的 Key，用于代币头像和税率" autocomplete="off" />
+      </label>
+      <button id="save-key" type="button">保存 Key</button>
+      <span id="key-status" class="notice"></span>
+    </section>
+
+    <div id="dialog" class="dialog" hidden>
+      <div class="dialog-card">
+        <h3 id="dialog-title">备注</h3>
+        <input id="dialog-input" />
+        <div class="dialog-actions">
+          <button type="button" data-ok>确定</button>
+          <button type="button" class="ghost" data-cancel>取消</button>
+        </div>
+      </div>
+    </div>
+
+    <section class="tools">
+      <div id="groups" class="groups"></div>
+      <div id="blocked" class="blocked"></div>
+      <div class="tool-row">
+        <form id="add-form">
+          <input id="group-id" placeholder="群 ID，例如 12345678@chatroom" required />
+          <input id="group-name" placeholder="群备注，可选" />
+          <button type="submit">添加群</button>
+        </form>
+        <div class="actions">
+          <button id="load-groups" type="button">读取本机群</button>
+          <button id="demo" type="button">插入一条样例</button>
+          <button id="clear" type="button">清空本地列表</button>
+        </div>
+      </div>
+      <p id="notice" class="notice"></p>
+      <label class="search directory-search" hidden>
+        <input id="directory-query" type="search" placeholder="筛选本机群名称或 ID" />
+      </label>
+      <div id="directory" class="directory"></div>
+    </section>
+
+    <main id="feed" class="feed"></main>
+    <div id="more" class="more" hidden>加载更早的消息…</div>
+    <footer class="site-foot">
+      微信群信息流 · 作者 <a href="https://x.com/0xTechMelon" target="_blank" rel="noreferrer">@0xTechMelon</a>
+      · 更多产品见 <a href="https://docs.jishugua.top" target="_blank" rel="noreferrer">docs.jishugua.top</a>
+    </footer>
+    <script src="/shared/feed.js?v=0.7.1"></script>
+    <script src="/assets/app.js?v=0.7.1"></script>
+  </body>
+</html>

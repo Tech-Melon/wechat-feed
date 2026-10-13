@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>微信群信息流</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header class="top">
+      <div class="brand">
+        <strong>微信群信息流</strong>
+        <span id="status" class="status">正在检查本地服务</span>
+      </div>
+      <button id="open" type="button" class="chip" title="打开本地页面 127.0.0.1:8765">本地页 ↗</button>
+    </header>
+
+    <nav class="tabs">
+      <button type="button" data-tab="show" class="on">显示</button>
+      <button type="button" data-tab="sound">提示音</button>
+      <button type="button" data-tab="more">设置</button>
+    </nav>
+    <p id="note" class="note" hidden></p>
+
+    <section data-panel="show">
+      <label class="item">
+        <span><b>插入 gmgn 推特流</b><small>微信消息按时间插在推文之间</small></span>
+        <input id="gmgn" type="checkbox" class="toggle" />
+      </label>
+      <label class="item">
+        <span><b>网页浮窗</b><small>只在「设置」里的白名单网址出现</small></span>
+        <input id="float-panel" type="checkbox" class="toggle" />
+      </label>
+    </section>
+
+    <section data-panel="sound" hidden>
+      <div class="channel" data-channel="ca">
+        <label class="item">
+          <span><b>合约（CA）</b></span>
+          <input data-on type="checkbox" class="toggle" />
+        </label>
+        <div class="pick">
+          <select data-sound>
+            <option value="voice">语音「注意，群里有新合约」</option>
+            <option value="chime">叮咚</option>
+            <option value="alarm">急促三连音</option>
+            <option value="custom">自定义音频…</option>
+          </select>
+          <button data-test type="button" class="play" title="试听">▶</button>
+        </div>
+        <label class="file" data-file-row hidden><input data-file type="file" accept="audio/*" /><span data-custom>选择音频文件（3 MB 内）</span></label>
+      </div>
+      <div class="channel" data-channel="star">
+        <label class="item">
+          <span><b>星标用户发言</b></span>
+          <input data-on type="checkbox" class="toggle" />
+        </label>
+        <div class="pick">
+          <select data-sound>
+            <option value="star-bell">清亮钟声</option>
+            <option value="star-harp">竖琴上行</option>
+            <option value="star-voice">语音「星标用户发言了」</option>
+            <option value="custom">自定义音频…</option>
+          </select>
+          <button data-test type="button" class="play" title="试听">▶</button>
+        </div>
+        <label class="file" data-file-row hidden><input data-file type="file" accept="audio/*" /><span data-custom>选择音频文件（3 MB 内）</span></label>
+      </div>
+      <div class="channel" data-channel="normal">
+        <label class="item">
+          <span><b>普通消息</b><small>仿微信提示音</small></span>
+          <input data-on type="checkbox" class="toggle" />
+        </label>
+        <div class="pick">
+          <select data-sound>
+            <option value="wx-ding">叮咚（木琴）</option>
+            <option value="wx-pop">气泡</option>
+            <option value="wx-tick">轻敲</option>
+            <option value="custom">自定义音频…</option>
+          </select>
+          <button data-test type="button" class="play" title="试听">▶</button>
+        </div>
+        <label class="file" data-file-row hidden><input data-file type="file" accept="audio/*" /><span data-custom>选择音频文件（3 MB 内）</span></label>
+      </div>
+      <label class="volume">音量
+        <input id="voice-volume" type="range" min="0" max="100" step="5" />
+        <span id="voice-volume-text"></span>
+      </label>
+      <p class="hint">一条消息只响一种：合约 &gt; 星标用户 &gt; 普通消息。选文件时弹窗被关掉，<a id="voice-tab" href="#">在标签页里打开</a>再选。</p>
+    </section>
+
+    <section data-panel="more" hidden>
+      <label class="field"><span>浮窗白名单 <small>每行一个网址</small></span>
+        <textarea id="float-sites" rows="3" spellcheck="false"></textarea>
+      </label>
+      <p class="hint">域名、路径和写出的参数要一致，网址多出的参数不影响。</p>
+      <button id="save-sites" type="button" class="ghost">保存白名单</button>
+      <label class="field"><span>卡片水印 <small>留空用默认</small></span>
+        <input id="watermark" type="text" maxlength="40" placeholder="关注 X: @0xTechMelon" />
+      </label>
+      <label class="field"><span>GMGN OpenAPI Key <small id="key-state"></small></span>
+        <input id="key" type="password" placeholder="gmgn_..." autocomplete="off" />
+      </label>
+      <button id="save-key" type="button" class="ghost">保存 Key</button>
+      <p class="hint">Key 只保存在本机服务 127.0.0.1:8765，不会发给网页。</p>
+    </section>
+
+    <footer class="links">
+      <a href="https://x.com/0xTechMelon" target="_blank" rel="noreferrer">𝕏 关注 @0xTechMelon</a>
+      <a href="https://docs.jishugua.top" target="_blank" rel="noreferrer">产品导航 docs.jishugua.top</a>
+    </footer>
+    <script src="popup.js"></script>
+  </body>
+</html>

@@ -1,0 +1,5 @@
+* text=auto
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.wav binary
+*.png binary

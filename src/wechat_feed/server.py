@@ -1,0 +1,415 @@
+"""只监听本机的信息流接口和本地页面。"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import re
+import time
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any
+
+import httpx
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from loguru import logger
+
+from .config import SettingsStore, data_dir, project_root
+from .direct import DirectSource
+from .hub import Hub
+from .normalize import normalize_message_event
+from .store import CardStore
+from .tokens import TokenIndex
+from .upstream import apply_display, backfill_history, fetch_upstream_groups, supervise
+from .wximage import load_image, parse_ref, ref_for
+
+_AVATAR_USER = re.compile(r"^[A-Za-z0-9_@.\-]{1,80}$")
+_AVATAR_TTL = 7 * 24 * 3600
+
+_LISTEN_HOST = "127.0.0.1"
+_LISTEN_PORT = 8765
+_PAGE_SIZE = 30
+
+
+def public_settings(settings: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(settings)
+    payload["has_gmgn_key"] = bool(settings.get("gmgn_api_key"))
+    payload["gmgn_api_key"] = ""
+    return payload
+
+
+def demo_event() -> dict[str, Any]:
+    local_id = time.time_ns()
+    address = "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c"
+    return {
+        "type": "message",
+        "username": "10001@chatroom",
+        "conversationName": "样例群",
+        "message": {
+            "id": f"demo:{local_id}",
+            "localId": local_id,
+            "createTime": int(time.time()),
+            "senderUsername": "wxid_demo",
+            "senderDisplayName": "样例发言",
+            "isSent": False,
+            "renderType": "quote",
+            "content": f"群里看到合约 {address} 冲不冲",
+            "quoteTitle": "群友",
+            "quoteUsername": "wxid_quoted",
+            "quoteContent": "按键加原始输入法，甚至不用看手机也能打字",
+        },
+    }
+
+
+def _sse(payload: dict[str, Any]) -> str:
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return f"data: {body}\n\n"
+
+
+def create_app() -> FastAPI:
+    store = SettingsStore(data_dir() / "settings.json")
+    persist = CardStore(data_dir() / "feed.db")
+    hub = Hub(persist=persist)
+    token_index = TokenIndex(lambda: str(store.get().get("gmgn_api_key") or ""))
+    direct = DirectSource(data_dir() / "direct.json")
+    root = project_root()
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        app.state.store = store
+        app.state.hub = hub
+        app.state.persist = persist
+        app.state.tokens = token_index
+        persist.prune()
+        stop = asyncio.Event()
+        tasks: list[asyncio.Task[None]] = []
+        if os.environ.get("WECHAT_FEED_DISABLE_UPSTREAM") != "1":
+            tasks.append(asyncio.create_task(backfill_history(store, hub, stop, direct)))
+            tasks.append(asyncio.create_task(supervise(store, hub, stop, token_index, direct)))
+        yield
+        stop.set()
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    app = FastAPI(title="微信群信息流", lifespan=lifespan)
+    # 网页不能跨源读群消息；只放行浏览器扩展，本地页是同源。
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origin_regex=r"^chrome-extension://[a-p]{32}$",
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    app.state.store = store
+    app.state.hub = hub
+    app.state.persist = persist
+
+    async def enrich_missing(card: dict[str, Any]) -> None:
+        if not card.get("cas") or card.get("tokenCards"):
+            return
+        try:
+            tokens = await token_index.resolve_many(list(card["cas"]))
+        except Exception as exc:
+            logger.info("代币信息补全失败: {}", type(exc).__name__)
+            return
+        if tokens:
+            hub.patch(str(card["id"]), {"tokenCards": tokens})
+
+    @app.get("/api/health")
+    def health() -> dict[str, Any]:
+        return {
+            "ok": True,
+            "host": _LISTEN_HOST,
+            "port": _LISTEN_PORT,
+            "runtime": hub.status(),
+            "source": "direct" if direct.active else "wda",
+            "sourceDetail": direct.detail,
+            "stored": persist.count(),
+        }
+
+    @app.get("/api/settings")
+    def get_settings() -> dict[str, Any]:
+        return public_settings(store.get())
+
+    @app.put("/api/settings")
+    async def put_settings(request: Request) -> dict[str, Any]:
+        try:
+            patch = await request.json()
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail="配置不是合法 JSON") from exc
+        if not isinstance(patch, dict):
+            raise HTTPException(status_code=400, detail="配置必须是对象")
+        try:
+            settings = store.replace(patch)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        public = public_settings(settings)
+        hub.notify_settings(public)
+        return public
+
+    @app.get("/api/messages")
+    async def get_messages(
+        limit: int = _PAGE_SIZE,
+        before: int | None = Query(default=None),
+        before_received: int | None = Query(default=None),
+        conversation_id: str = Query(default=""),
+        ca_only: bool = Query(default=False),
+    ) -> dict[str, Any]:
+        settings = store.get()
+        blocked = list(settings.get("blocked_groups") or [])
+        cards, has_more = persist.page(
+            limit=limit,
+            before=before,
+            before_received=before_received,
+            conversation_id=conversation_id or None,
+            blocked=blocked,
+            ca_only=ca_only or bool(settings.get("ca_only")),
+        )
+        shown = [apply_display(dict(card), settings) for card in cards]
+        for card in shown:
+            persist.fill_context(card)
+        pending = 0
+        for card in shown:
+            if pending >= 12:
+                break
+            if card.get("cas") and not card.get("tokenCards"):
+                asyncio.create_task(enrich_missing(card))
+                pending += 1
+        return {
+            "messages": shown,
+            "has_more": has_more,
+            "stored": persist.count(),
+        }
+
+    def _avatar_files(ident: str) -> tuple[Path, Path]:
+        folder = data_dir() / "avatars"
+        folder.mkdir(parents=True, exist_ok=True)
+        safe = ident.replace("/", "_").replace("\\", "_")
+        return folder / f"{safe}.bin", folder / f"{safe}.mime"
+
+    @app.get("/api/avatar")
+    async def avatar(username: str) -> Response:
+        ident = str(username or "").strip()
+        if not _AVATAR_USER.match(ident):
+            raise HTTPException(status_code=400, detail="用户名不合法")
+        blob_path, mime_path = _avatar_files(ident)
+        if blob_path.exists() and time.time() - blob_path.stat().st_mtime < _AVATAR_TTL:
+            media_type = "image/jpeg"
+            if mime_path.exists():
+                media_type = mime_path.read_text(encoding="utf-8").strip() or media_type
+            return Response(
+                content=blob_path.read_bytes(),
+                media_type=media_type,
+                headers={"Cache-Control": "private, max-age=604800, immutable"},
+            )
+        settings = store.get()
+        reader = await direct.reader(str(settings["upstream_base"]))
+        if reader is not None:
+            try:
+                blob = await asyncio.to_thread(reader.avatar, ident)
+            except Exception as exc:
+                logger.info("直读头像失败: {}", type(exc).__name__)
+                blob = None
+            if blob:
+                media_type = "image/png" if blob[:4] == b"\x89PNG" else "image/jpeg"
+                blob_path.write_bytes(blob)
+                mime_path.write_text(media_type, encoding="utf-8")
+                return Response(
+                    content=blob,
+                    media_type=media_type,
+                    headers={"Cache-Control": "private, max-age=604800, immutable"},
+                )
+        url = f"{settings['upstream_base']}/api/chat/avatar"
+        try:
+            async with httpx.AsyncClient(
+                timeout=8.0, trust_env=False, follow_redirects=True
+            ) as client:
+                response = await client.get(url, params={"username": ident, "source": "auto"})
+        except Exception as exc:
+            logger.info("头像读取失败: {}", type(exc).__name__)
+            raise HTTPException(status_code=502, detail="头像读不到") from exc
+        content_type = str(response.headers.get("content-type") or "")
+        if response.status_code != 200 or not content_type.startswith("image/"):
+            raise HTTPException(status_code=404, detail="没有头像")
+        blob_path.write_bytes(response.content)
+        mime_path.write_text(content_type, encoding="utf-8")
+        return Response(
+            content=response.content,
+            media_type=content_type,
+            headers={"Cache-Control": "private, max-age=604800, immutable"},
+        )
+
+    async def local_media(query: str) -> Response | None:
+        """WDA 关掉后，旧卡片里的 WDA 图片地址改从本机直接解。"""
+        from urllib.parse import parse_qs
+
+        params = parse_qs(query)
+        name = (params.get("md5") or [""])[0]
+        room = (params.get("username") or [""])[0]
+        reader = await direct.reader(str(store.get()["upstream_base"]))
+        if reader is None or not room.endswith("@chatroom"):
+            return None
+        ref = await asyncio.to_thread(ref_for, reader.wx_dir, room, name)
+        if not ref:
+            return None
+        keys = direct.image_keys()
+        aes_key, xor_key = keys if keys else (None, None)
+        found = await asyncio.to_thread(load_image, reader.wx_dir, ref, aes_key, xor_key)
+        if found is None:
+            return None
+        return Response(
+            content=found[0],
+            media_type=found[1],
+            headers={"Cache-Control": "private, max-age=604800, immutable"},
+        )
+
+    @app.get("/api/media")
+    async def media(u: str) -> Response:
+        from urllib.parse import unquote, urlsplit
+
+        raw = unquote(str(u or ""))
+        parsed = urlsplit(raw)
+        host = (parsed.hostname or "").lower()
+        if parsed.scheme != "http" or host not in {"127.0.0.1", "localhost"}:
+            raise HTTPException(status_code=400, detail="只允许读取本机媒体")
+        if parsed.port != 10392:
+            raise HTTPException(status_code=400, detail="媒体端口不正确")
+        try:
+            async with httpx.AsyncClient(
+                timeout=10.0, trust_env=False, follow_redirects=True
+            ) as client:
+                response = await client.get(raw)
+        except Exception as exc:
+            fallback = await local_media(parsed.query)
+            if fallback is not None:
+                return fallback
+            logger.info("媒体读取失败: {}", type(exc).__name__)
+            raise HTTPException(status_code=502, detail="媒体读不到") from exc
+        content_type = str(response.headers.get("content-type") or "application/octet-stream")
+        if response.status_code != 200:
+            raise HTTPException(status_code=404, detail="没有这张图")
+        return Response(
+            content=response.content,
+            media_type=content_type,
+            headers={"Cache-Control": "private, max-age=86400"},
+        )
+
+    @app.get("/api/wximg")
+    async def wx_image(ref: str, hd: bool = False) -> Response:
+        if parse_ref(ref) is None:
+            raise HTTPException(status_code=400, detail="图片引用不合法")
+        reader = await direct.reader(str(store.get()["upstream_base"]))
+        if reader is None:
+            raise HTTPException(status_code=503, detail="直读模式没有打开")
+        keys = direct.image_keys()
+        aes_key, xor_key = keys if keys else (None, None)
+        found = await asyncio.to_thread(load_image, reader.wx_dir, ref, aes_key, xor_key, hd=hd)
+        if found is None:
+            # 微信可能还没下载完缩略图，不能让浏览器缓存这次失败。
+            raise HTTPException(
+                status_code=404,
+                detail="图片还没下载或解不开",
+                headers={"Cache-Control": "no-store"},
+            )
+        blob, media_type = found
+        return Response(
+            content=blob,
+            media_type=media_type,
+            headers={"Cache-Control": "private, max-age=604800, immutable"},
+        )
+
+    @app.delete("/api/messages")
+    def delete_messages() -> dict[str, bool]:
+        hub.clear()
+        persist.clear()
+        return {"ok": True}
+
+    @app.get("/api/groups")
+    async def get_groups() -> dict[str, Any]:
+        settings = store.get()
+        try:
+            reader = await direct.reader(str(settings["upstream_base"]))
+            if reader is not None:
+                groups = await asyncio.to_thread(reader.groups)
+            else:
+                groups = await fetch_upstream_groups(str(settings["upstream_base"]))
+        except Exception as exc:
+            logger.info("读取群列表失败: {}", type(exc).__name__)
+            raise HTTPException(
+                status_code=502,
+                detail="读不到本机微信会话。请确认 WeChatDataAnalysis 已启动并完成解密。",
+            ) from exc
+        return {"groups": groups}
+
+    @app.post("/api/demo")
+    async def post_demo() -> dict[str, Any]:
+        card = normalize_message_event(demo_event(), demo=True)
+        if card is None:
+            raise HTTPException(status_code=500, detail="样例消息没有写入")
+        apply_display(card, store.get())
+        if not hub.publish(card):
+            raise HTTPException(status_code=500, detail="样例消息没有写入")
+        if card.get("cas"):
+            tokens = await token_index.resolve_many(list(card["cas"]))
+            if tokens:
+                hub.patch(str(card["id"]), {"tokenCards": tokens})
+                card["tokenCards"] = tokens
+        return {"ok": True, "card": card}
+
+    @app.get("/api/events")
+    async def events() -> StreamingResponse:
+        queue = hub.subscribe()
+
+        async def generate():
+            try:
+                yield _sse(
+                    {
+                        "type": "hello",
+                        "status": hub.status(),
+                        "settings": public_settings(store.get()),
+                    }
+                )
+                while True:
+                    try:
+                        item = await asyncio.wait_for(queue.get(), timeout=15)
+                    except TimeoutError:
+                        yield ": ping\n\n"
+                        continue
+                    yield _sse(item)
+            finally:
+                hub.unsubscribe(queue)
+
+        return StreamingResponse(
+            generate(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    @app.get("/")
+    def index() -> FileResponse:
+        return FileResponse(root / "web" / "index.html")
+
+    @app.get("/shared/feed.js")
+    def shared_feed() -> FileResponse:
+        return FileResponse(root / "extension" / "feed.js", media_type="text/javascript")
+
+    app.mount("/assets", StaticFiles(directory=root / "web"), name="assets")
+    return app
+
+
+def serve() -> None:
+    import uvicorn
+
+    logger.info("本地页面 http://{}:{}/", _LISTEN_HOST, _LISTEN_PORT)
+    uvicorn.run(
+        create_app(),
+        host=_LISTEN_HOST,
+        port=_LISTEN_PORT,
+        log_config=None,
+        access_log=False,
+    )

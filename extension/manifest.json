@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "微信群信息流",
+  "version": "0.7.1",
+  "author": "0xTechMelon",
+  "homepage_url": "https://docs.jishugua.top",
+  "description": "本地微信群信息流。可插入 gmgn 推特监控页，也可在白名单网页上使用可拖拽浮窗。",
+  "permissions": ["storage", "offscreen", "scripting"],
+  "host_permissions": ["http://127.0.0.1:8765/*", "https://gmgn.ai/*", "*://*/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "icons": {
+    "16": "icon.png",
+    "48": "icon.png",
+    "128": "icon.png"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": "icon.png",
+    "default_title": "微信群信息流 · 关注 X @0xTechMelon"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://gmgn.ai/*"],
+      "js": ["feed.js", "content.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://gmgn.ai/*"],
+      "js": ["gmgn_main.js"],
+      "world": "MAIN",
+      "run_at": "document_idle"
+    }
+  ]
+}
