@@ -10,6 +10,7 @@ import uuid
 from collections import deque
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from loguru import logger
@@ -128,6 +129,16 @@ def chain_favicon(name: str) -> tuple[str, str] | None:
         return None
     url = f"https://www.google.com/s2/favicons?sz=64&domain={domain}"
     return url, f"{key}.png"
+
+
+def allowed_chainicon_url(url: str) -> bool:
+    parsed = urlsplit(str(url or ""))
+    if parsed.scheme != "https":
+        return False
+    host = (parsed.hostname or "").lower()
+    if host in {"www.google.com", "google.com"}:
+        return parsed.path.startswith("/s2/favicons")
+    return host == "gstatic.com" or host.endswith(".gstatic.com")
 
 
 def gmgn_api_chain(value: str | None) -> str:

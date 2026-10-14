@@ -11,6 +11,12 @@ from .wximage import sniff
 _MD5 = re.compile(r"^[0-9a-f]{32}$")
 _SLUG = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _STICKER_HOSTS = (".tc.qq.com", ".qpic.cn")
+_EMOTE_HOSTS = (
+    "cdn.jsdelivr.net",
+    "fastly.jsdelivr.net",
+    "gcore.jsdelivr.net",
+    "res.wx.qq.com",
+)
 _PNG = "https://cdn.jsdelivr.net/gh/YiJio/emoji-chinese@1.1.0/wx/wx-new/default/{slug}.png"
 _GIF = "https://res.wx.qq.com/mpres/htmledition/images/icon/emotion/{slug}.gif"
 
@@ -168,6 +174,14 @@ def allowed_sticker_url(url: str) -> bool:
         return False
     host = (parsed.hostname or "").lower()
     return any(host == item[1:] or host.endswith(item) for item in _STICKER_HOSTS)
+
+
+def allowed_emote_url(url: str) -> bool:
+    parsed = urlsplit(str(url or ""))
+    if parsed.scheme != "https":
+        return False
+    host = (parsed.hostname or "").lower()
+    return host in _EMOTE_HOSTS
 
 
 def sticker_cache(folder: Path, md5: str) -> Path:

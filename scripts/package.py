@@ -21,6 +21,7 @@ ITEMS = (
     "pyproject.toml",
     "uv.lock",
     "README.md",
+    "LICENSE",
     "wechat-feed.cmd",
     ".gitignore",
 )

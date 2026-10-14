@@ -15,6 +15,7 @@ from wechat_feed.normalize import extract_groups, normalize_message_event
 from wechat_feed.store import CardStore
 from wechat_feed.tokens import (
     _from_pair,
+    allowed_chainicon_url,
     candidate_chains,
     chain_from_search,
     extract_cas,
@@ -26,6 +27,7 @@ from wechat_feed.tokens import (
 )
 from wechat_feed.upstream import _allowed, _stream_urls, parse_sse_block
 from wechat_feed.wechatdb import decode_content, parse_row, room_nicknames, strip_sender, table_name
+from wechat_feed.wxemoji import allowed_emote_url, allowed_sticker_url
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -131,6 +133,20 @@ def test_upstream_must_stay_on_loopback() -> None:
         validate_upstream_base("http://10.0.0.8:10392")
     with pytest.raises(ValueError):
         normalize_settings({"gmgn_overlay": "yes"})
+
+
+def test_public_docs_cover_wda_and_unpacked_extension() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "[MIT](LICENSE)" in readme
+    assert "不上架" in readme
+    assert "加载已解压的扩展程序" in readme
+    assert "WeChatDataAnalysis" in readme
+    assert "data/direct.json" in readme
+    assert (ROOT / "LICENSE").is_file()
+    guide = (ROOT / "docs" / "使用指南.md").read_text(encoding="utf-8")
+    assert "不在监控群的不入库" in guide
+    assert "只过滤显示" in guide
+    assert "补 search" in guide
 
 
 def test_api_defaults_and_two_paths(client: TestClient) -> None:
@@ -365,6 +381,59 @@ def test_page_respects_allowed_groups(tmp_path: Path) -> None:
     assert [item["id"] for item in only_b] == ["b"]
     both, _ = store.page(limit=10, allowed=[])
     assert {item["id"] for item in both} == {"a", "b"}
+
+
+def test_messages_api_respects_feed_groups(client: TestClient) -> None:
+    room_a = "111111111111@chatroom"
+    room_b = "222222222222@chatroom"
+    saved = client.put(
+        "/api/settings",
+        json={"all_feed_groups": [room_a], "ca_feed_groups": [room_b]},
+    )
+    assert saved.status_code == 200
+    persist = client.app.state.persist
+    now = 1_800_000_000
+    persist.save(
+        {
+            "id": "all-mode",
+            "conversationId": room_a,
+            "createTime": now,
+            "receivedAt": 2,
+            "text": "all",
+            "addresses": [],
+            "cas": [],
+        }
+    )
+    persist.save(
+        {
+            "id": "ca-mode",
+            "conversationId": room_b,
+            "createTime": now,
+            "receivedAt": 1,
+            "text": "ca",
+            "addresses": ["0xabc"],
+            "cas": [{"address": "0xabc"}],
+        }
+    )
+    first = client.get("/api/messages?limit=10").json()["messages"]
+    assert [item["id"] for item in first] == ["all-mode"]
+    only_ca = client.get("/api/messages?limit=10&ca_only=true").json()["messages"]
+    assert [item["id"] for item in only_ca] == ["ca-mode"]
+    mixed = client.get("/api/messages?limit=10&include_all_groups=true").json()["messages"]
+    assert {item["id"] for item in mixed} == {"all-mode", "ca-mode"}
+
+
+def test_remote_image_hosts_are_allowlisted() -> None:
+    assert allowed_sticker_url("https://emoji.qpic.cn/sticker.png")
+    assert not allowed_sticker_url("http://127.0.0.1:8765/secret")
+    assert not allowed_sticker_url("https://evil.example/x")
+    assert allowed_emote_url("https://cdn.jsdelivr.net/gh/YiJio/emoji-chinese@1.1.0/wx/wx-new/default/wl.png")
+    assert allowed_emote_url("https://res.wx.qq.com/mpres/htmledition/images/icon/emotion/1.gif")
+    assert not allowed_emote_url("http://res.wx.qq.com/x.gif")
+    assert allowed_chainicon_url("https://www.google.com/s2/favicons?sz=64&domain=solana.com")
+    assert allowed_chainicon_url("https://t2.gstatic.com/faviconV2")
+    assert not allowed_chainicon_url("https://www.google.com/search")
+    assert not allowed_chainicon_url("http://127.0.0.1:10392/x")
 
 
 def test_ingest_keeps_blocked_and_user_filters() -> None:
@@ -937,6 +1006,10 @@ def test_package_omits_local_data_and_api_key() -> None:
     assert "wf-mcap" in feed
     assert "data-mcap-format" in feed
     assert "wf-tag-ico" in feed
+    background = (ROOT / "extension" / "background.js").read_text(encoding="utf-8")
+    assert "include_all_groups" in background
+    app_js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+    assert "await reloadFeeds()" in app_js
     assert "wf-text-link" in feed
     assert "点點" in feed
     assert "hxxp" in feed

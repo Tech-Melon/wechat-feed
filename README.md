@@ -1,23 +1,64 @@
 # 技术瓜群流
 
-把本机微信 4.x 里**你已经能收到的群发言**，做成一条本地信息流：本地网页、gmgn 推特监控页插入、白名单网页浮窗三种看法，群里出现合约（CA）、星标用户发言或有新消息时可以分别响不同的提示音。只读本机数据，不发消息、不上传聊天内容。
+把本机微信 4.x 里**你已经能收到的群发言**，做成一条本地信息流：本地网页、gmgn 推特监控页插入、白名单网页浮窗三种看法。群里出现合约（CA）、星标用户发言或有新消息时，可以分别响不同的提示音。
+
+只读本机数据，不发消息、不上传聊天内容。许可证 [MIT](LICENSE)。
 
 作者：[@0xTechMelon](https://x.com/0xTechMelon) · 更多产品：[docs.jishugua.top](https://docs.jishugua.top)
-
-适配微信 `4.1.13.65` 这一代 4.x 客户端（Windows）。第一次使用需要开源版 [WeChatDataAnalysis](https://github.com/LifeArchiveProject/WeChatDataAnalysis)（下称 WDA）取一次库密钥，之后可以关掉。
 
 - 第一次安装、日常启停、常见问题：[docs/使用指南.md](docs/使用指南.md)
 - 打包发给别人：[docs/发布清单.md](docs/发布清单.md)
 
+## 公开使用前请先读这三件事
+
+### 1. 它只读你自己电脑上的微信
+
+适配 Windows 上的微信 `4.1.13.65` 这一代 4.x 桌面版。服务只监听 `127.0.0.1:8765`，局域网里的其他设备访问不到群消息。不要把 `data/` 文件夹发给任何人：里面有库密钥、GMGN Key 和近 30 天的消息缓存。
+
+### 2. WeChatDataAnalysis（WDA）是干什么的
+
+本项目**不包含、不修改** WDA。微信 4.x 的本地库是加密的，本服务自己解不开。
+
+第一次启动时，你需要先打开开源版 [WeChatDataAnalysis](https://github.com/LifeArchiveProject/WeChatDataAnalysis)，按它的提示完成解密并保持开着。本服务会向 WDA 的本机接口要一次库密钥（以及图片密钥），写进 `data/direct.json`。`wechat-feed.cmd status` 显示数据来源为 `direct` 之后，就可以把 WDA 关掉。之后本服务自己只读打开微信库，不再依赖 WDA。
+
+请用开源版，不要用文件名以 `advanced-` 开头的高级版。本仓库不会附带 WDA 安装包，请到它自己的 GitHub 下载。
+
+还需要再开一次 WDA 的情况：微信换了账号导致密钥失效（`status` 变成 `wda`）、或者从来没解开过群图片。
+
+### 3. 浏览器插件不上架商店
+
+插件以 **Chrome / Edge 开发者模式 → 加载已解压的扩展程序** 安装，选仓库里的 `extension` 文件夹。不会上架 Chrome 网上应用店。
+
+不上架的原因：浮窗要出现在你自己加白名单的网站上，扩展权限按站点动态注册；商店审核这条既麻烦也没必要。Chrome 每次启动可能提示「停用开发者模式扩展程序」，点「保留」即可。
+
 ## 快速上手
 
-```powershell
-wechat-feed.cmd setup      # 安装依赖（需要先装 uv）
-# 打开 WDA，完成解密
-wechat-feed.cmd install    # 开机自启，并立即在后台启动
-```
+1. 安装 [uv](https://docs.astral.sh/uv/)（PowerShell）：
 
-然后在 Chrome 的 `chrome://extensions` 打开开发者模式，「加载已解压的扩展程序」选 `extension` 目录。本地页面是 `http://127.0.0.1:8765/`。
+   ```powershell
+   powershell -ExecutionPolicy Bypass -c "irm https://astral.sh/uv/install.ps1 | iex"
+   ```
+
+   装完后重新打开命令行窗口。
+
+2. 克隆或解压到固定目录，例如 `D:\wechat-feed`，进入该目录：
+
+   ```powershell
+   .\wechat-feed.cmd setup
+   ```
+
+3. 打开开源版 WDA，完成解密，保持它开着。
+
+4. 启动本服务并设为开机自启：
+
+   ```powershell
+   .\wechat-feed.cmd install
+   .\wechat-feed.cmd status
+   ```
+
+   数据来源显示 `direct` 后即可关掉 WDA。本地页面：`http://127.0.0.1:8765/`。
+
+5. 安装插件：打开 `chrome://extensions`（Edge 是 `edge://extensions`）→ 打开「开发者模式」→「加载已解压的扩展程序」→ 选项目里的 `extension` 文件夹。点开插件弹窗，不再提示「本地服务没连上」即成功。
 
 ## 服务管理
 
@@ -59,7 +100,7 @@ wechat-feed.cmd install    # 开机自启，并立即在后台启动
 
 ### GMGN 限频
 
-每秒已用权重不超过套餐权重（免费版 5）：`market/search`、`token/info`、`token/security`、`token/pool` 每次扣 1，`token/holders`、`token/traders` 每次扣 5。先 search（约 250–500ms）定链或标钱包，再查 token/info，不再并行盲探。按 1 秒滑动窗口排队，收到 429 先空出 1 秒。升级套餐后设环境变量 `WECHAT_FEED_GMGN_RATE=<新权重>`。
+每秒已用权重不超过套餐权重（免费版 5）：`market/search`、`token/info`、`token/security`、`token/pool` 每次扣 1，`token/holders`、`token/traders` 每次扣 5。先无链 search 定链或标钱包，未命中的 EVM 再按 bsc / eth / robinhood 补 search，然后查 token/info，不再对 token/info 盲探。按 1 秒滑动窗口排队，收到 429 先冷却 8 秒。升级套餐后设环境变量 `WECHAT_FEED_GMGN_RATE=<新权重>`。
 
 ## 边界
 

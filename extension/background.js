@@ -271,7 +271,7 @@ chrome.runtime.onConnect.addListener((port) => {
   if (port.name === "gmgn-feed") {
     port.onMessage.addListener((message) => {
       if (message?.type === "snapshot") {
-        const params = new URLSearchParams({ limit: "30" });
+        const params = new URLSearchParams({ limit: "80", include_all_groups: "true" });
         if (message.before) params.set("before", String(message.before));
         if (message.before_received) params.set("before_received", String(message.before_received));
         if (message.conversation_id) params.set("conversation_id", String(message.conversation_id));

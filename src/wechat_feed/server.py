@@ -7,6 +7,7 @@ import json
 import os
 import re
 import time
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -18,14 +19,22 @@ from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
 from . import http as feed_http
-from .config import SettingsStore, data_dir, group_senders_by_id, project_root, validate_group_id
+from .config import (
+    SettingsStore,
+    data_dir,
+    display_group_ids,
+    group_senders_by_id,
+    project_root,
+    validate_group_id,
+)
 from .direct import DirectSource
 from .hub import Hub
 from .normalize import normalize_message_event
 from .store import CardStore
-from .tokens import TokenIndex, chain_favicon
+from .tokens import TokenIndex, allowed_chainicon_url, chain_favicon
 from .upstream import apply_display, backfill_history, fetch_upstream_groups, supervise
 from .wxemoji import (
+    allowed_emote_url,
     allowed_sticker_url,
     decode_query_url,
     emote_source,
@@ -182,17 +191,22 @@ def create_app() -> FastAPI:
         before_received: int | None = Query(default=None),
         conversation_id: str = Query(default=""),
         ca_only: bool = Query(default=False),
+        include_all_groups: bool = Query(default=False),
     ) -> dict[str, Any]:
         settings = store.get()
         blocked = list(settings.get("blocked_groups") or [])
         blocked_senders = [str(item) for item in (settings.get("blocked_users") or []) if item]
         senders = group_senders_by_id(settings)
+        allowed = None
+        if not conversation_id and not include_all_groups:
+            allowed = display_group_ids(settings, ca_only=ca_only) or None
         cards, has_more = persist.page(
             limit=limit,
             before=before,
             before_received=before_received,
             conversation_id=conversation_id or None,
             blocked=blocked,
+            allowed=allowed,
             ca_only=ca_only,
             senders_by_group=senders or None,
             blocked_senders=blocked_senders or None,
@@ -357,6 +371,7 @@ def create_app() -> FastAPI:
         url: str,
         cache: Path,
         ceiling: int,
+        allow: Callable[[str], bool],
         *,
         cache_header: str = "private, max-age=604800, immutable",
     ) -> Response:
@@ -370,11 +385,15 @@ def create_app() -> FastAPI:
                     headers={"Cache-Control": cache_header},
                 )
         try:
-            remote = await feed_http.client().get(
+            remote = await feed_http.get_hops(
                 url,
+                allow,
                 timeout=8.0,
                 headers={"User-Agent": "Mozilla/5.0"},
             )
+        except feed_http.HopDenied as exc:
+            logger.info("远程图片跳转被拒: {}", exc.url)
+            raise HTTPException(status_code=400, detail="图片地址不合法") from exc
         except Exception as exc:
             logger.info("远程图片下载失败: {}", type(exc).__name__)
             raise HTTPException(status_code=502, detail="图片读不到") from exc
@@ -398,7 +417,12 @@ def create_app() -> FastAPI:
         url = decode_query_url(u)
         if not allowed_sticker_url(url):
             raise HTTPException(status_code=400, detail="表情地址不合法")
-        return await _cached_image(url, sticker_cache(data_dir() / "stickers", md5), 1_500_000)
+        return await _cached_image(
+            url,
+            sticker_cache(data_dir() / "stickers", md5),
+            1_500_000,
+            allowed_sticker_url,
+        )
 
     @app.get("/api/wxemote")
     async def wx_emote(n: str = "") -> Response:
@@ -406,7 +430,9 @@ def create_app() -> FastAPI:
         if source is None:
             raise HTTPException(status_code=404, detail="没有这个表情")
         url, filename = source
-        return await _cached_image(url, data_dir() / "emotes" / filename, 80_000)
+        return await _cached_image(
+            url, data_dir() / "emotes" / filename, 80_000, allowed_emote_url
+        )
 
     @app.get("/api/chainicon")
     async def chain_icon(n: str = "") -> Response:
@@ -418,6 +444,7 @@ def create_app() -> FastAPI:
             url,
             data_dir() / "chainicons" / filename,
             80_000,
+            allowed_chainicon_url,
             cache_header="private, max-age=31536000, immutable",
         )
 

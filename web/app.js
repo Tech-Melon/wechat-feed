@@ -386,7 +386,7 @@ async function toggleFeedGroup(storedKey, groupId) {
   try {
     await saveSettings({ [storedKey]: next }, { skipFeed: true });
     renderGroups();
-    renderFeed();
+    await reloadFeeds();
   } catch (error) {
     setNotice(error.message);
   }
