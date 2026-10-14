@@ -307,11 +307,18 @@ class CardStore:
         card_id: str,
         newer: bool,
         batch: int = 40,
+        sender: str | None = None,
     ) -> list[dict[str, Any]]:
         cutoff = self.cutoff()
+        sender_sql = ""
+        extra: list[Any] = []
+        if sender:
+            sender_sql = "AND json_extract(payload, '$.senderUsername') = ? "
+            extra = [sender]
         if newer:
             sql = (
                 "SELECT payload FROM cards WHERE conversation_id = ? AND create_time >= ? "
+                f"{sender_sql}"
                 "AND (create_time > ? OR (create_time = ? AND received_at > ?) "
                 "OR (create_time = ? AND received_at = ? AND id > ?)) "
                 "ORDER BY create_time ASC, received_at ASC, id ASC LIMIT ?"
@@ -319,6 +326,7 @@ class CardStore:
         else:
             sql = (
                 "SELECT payload FROM cards WHERE conversation_id = ? AND create_time >= ? "
+                f"{sender_sql}"
                 "AND (create_time < ? OR (create_time = ? AND received_at < ?) "
                 "OR (create_time = ? AND received_at = ? AND id < ?)) "
                 "ORDER BY create_time DESC, received_at DESC, id DESC LIMIT ?"
@@ -326,6 +334,7 @@ class CardStore:
         args: list[Any] = [
             conversation_id,
             cutoff,
+            *extra,
             int(create_time),
             int(create_time),
             int(received_at),
@@ -363,7 +372,8 @@ class CardStore:
             received_at=received_at,
             card_id=card_id,
             newer=False,
-            batch=80,
+            batch=size,
+            sender=sender,
         )
         newer = self._fetch_side(
             conversation_id=conversation_id,
@@ -371,27 +381,20 @@ class CardStore:
             received_at=received_at,
             card_id=card_id,
             newer=True,
-            batch=80,
+            batch=size,
+            sender=sender,
         )
-        before: list[dict[str, Any]] = []
-        for item in older:
-            if str(item.get("senderUsername") or "") != sender:
-                continue
-            if str(item.get("id") or "") == card_id:
-                continue
-            before.append(self.slim_context(item))
-            if len(before) >= size:
-                break
+        before = [
+            self.slim_context(item)
+            for item in older
+            if str(item.get("id") or "") != card_id
+        ][:size]
         before.reverse()
-        after: list[dict[str, Any]] = []
-        for item in newer:
-            if str(item.get("senderUsername") or "") != sender:
-                continue
-            if str(item.get("id") or "") == card_id:
-                continue
-            after.append(self.slim_context(item))
-            if len(after) >= size:
-                break
+        after = [
+            self.slim_context(item)
+            for item in newer
+            if str(item.get("id") or "") != card_id
+        ][:size]
         return before, after
 
     def earlier_ca_cards(self, card: dict[str, Any], *, limit: int = 8) -> list[dict[str, Any]]:
@@ -399,23 +402,34 @@ class CardStore:
         sender = str(card.get("senderUsername") or "")
         if not conversation_id or not sender:
             return []
-        older = self._fetch_side(
-            conversation_id=conversation_id,
-            create_time=int(card.get("createTime") or 0),
-            received_at=int(card.get("receivedAt") or 0),
-            card_id=str(card.get("id") or ""),
-            newer=False,
-            batch=80,
-        )
+        create_time = int(card.get("createTime") or 0)
+        received_at = int(card.get("receivedAt") or 0)
+        card_id = str(card.get("id") or "")
+        want = max(1, min(int(limit), 12))
         found: list[dict[str, Any]] = []
-        for item in older:
-            if str(item.get("senderUsername") or "") != sender:
-                continue
-            if not self.has_ca(item):
-                continue
-            found.append(item)
-            if len(found) >= max(1, min(int(limit), 12)):
+        for _ in range(8):
+            older = self._fetch_side(
+                conversation_id=conversation_id,
+                create_time=create_time,
+                received_at=received_at,
+                card_id=card_id,
+                newer=False,
+                batch=80,
+                sender=sender,
+            )
+            if not older:
                 break
+            for item in older:
+                item_id = str(item.get("id") or "")
+                if item_id == card_id or not self.has_ca(item):
+                    continue
+                found.append(item)
+                if len(found) >= want:
+                    return found
+            last = older[-1]
+            create_time = int(last.get("createTime") or 0)
+            received_at = int(last.get("receivedAt") or 0)
+            card_id = str(last.get("id") or "")
         return found
 
     def fill_context(self, card: dict[str, Any], *, limit: int = 3) -> dict[str, Any]:

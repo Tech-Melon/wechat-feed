@@ -425,6 +425,7 @@ def test_messages_api_respects_feed_groups(client: TestClient) -> None:
 
 def test_remote_image_hosts_are_allowlisted() -> None:
     assert allowed_sticker_url("https://emoji.qpic.cn/sticker.png")
+    assert allowed_sticker_url("https://szextshort.weixin.qq.com/x")
     assert not allowed_sticker_url("http://127.0.0.1:8765/secret")
     assert not allowed_sticker_url("https://evil.example/x")
     assert allowed_emote_url("https://cdn.jsdelivr.net/gh/YiJio/emoji-chinese@1.1.0/wx/wx-new/default/wl.png")
@@ -720,6 +721,71 @@ def test_ca_card_includes_sender_neighbors(tmp_path: Path) -> None:
     assert len(filled["contextAfter"]) == 3
 
 
+def test_around_sender_finds_user_across_busy_room(tmp_path: Path) -> None:
+    store = CardStore(tmp_path / "feed.db")
+    now = 1_800_000_400
+    room = "12345678@chatroom"
+    texts = ["前文1", "前文2", "前文3"]
+    for index, text in enumerate(texts):
+        store.save(
+            {
+                "id": f"me-{index}",
+                "conversationId": room,
+                "senderUsername": "wxid_alpha",
+                "createTime": now + index,
+                "receivedAt": now * 1000 + index,
+                "text": text,
+            }
+        )
+    for index in range(90):
+        store.save(
+            {
+                "id": f"other-{index}",
+                "conversationId": room,
+                "senderUsername": "wxid_other",
+                "createTime": now + 10 + index,
+                "receivedAt": now * 1000 + 10 + index,
+                "text": f"灌水{index}",
+            }
+        )
+    store.save(
+        {
+            "id": "ca",
+            "conversationId": room,
+            "senderUsername": "wxid_alpha",
+            "createTime": now + 200,
+            "receivedAt": now * 1000 + 200,
+            "text": "看这个合约",
+            "addresses": ["0x" + "ab" * 20],
+            "cas": [{"address": "0x" + "ab" * 20}],
+        }
+    )
+    for index, text in enumerate(["后文1", "后文2", "后文3"]):
+        store.save(
+            {
+                "id": f"after-{index}",
+                "conversationId": room,
+                "senderUsername": "wxid_alpha",
+                "createTime": now + 300 + index,
+                "receivedAt": now * 1000 + 300 + index,
+                "text": text,
+            }
+        )
+    ca = {
+        "id": "ca",
+        "conversationId": room,
+        "senderUsername": "wxid_alpha",
+        "createTime": now + 200,
+        "receivedAt": now * 1000 + 200,
+        "text": "看这个合约",
+        "addresses": ["0x" + "ab" * 20],
+        "cas": [{"address": "0x" + "ab" * 20}],
+    }
+    before, after = store.around_sender(ca)
+    assert [item["text"] for item in before] == texts
+    assert [item["text"] for item in after] == ["后文1", "后文2", "后文3"]
+
+
 def test_later_messages_refresh_ca_context_after(tmp_path: Path) -> None:
     store = CardStore(tmp_path / "feed.db")
     hub = Hub(persist=store)
@@ -828,7 +894,7 @@ def test_direct_share_link_keeps_url() -> None:
 
 
 def test_direct_emoji_sticker_and_system_emote() -> None:
-    from wechat_feed.wxemoji import allowed_sticker_url, emote_source
+    from wechat_feed.wxemoji import STICKER_MAX, allowed_sticker_url, emote_source, within_limit
 
     xml = (
         'wxid_me01:\n<msg><emoji fromusername="wxid_me01" type="2" '
@@ -849,7 +915,11 @@ def test_direct_emoji_sticker_and_system_emote() -> None:
     assert card["mediaUrl"].startswith("/api/wxemoji?md5=")
     assert "u=" in card["mediaUrl"]
     assert allowed_sticker_url(row["emojiUrl"])
+    assert allowed_sticker_url("https://szextshort.weixin.qq.com/stodownload?m=abc")
     assert not allowed_sticker_url("https://evil.example/x")
+    assert STICKER_MAX >= 4_000_000
+    assert within_limit(b"0" * 2_335_236, STICKER_MAX)
+    assert not within_limit(b"0" * (STICKER_MAX + 1), STICKER_MAX)
     png = emote_source("捂脸")
     assert png is not None and png[1] == "wl.png"
     gif = emote_source("冷汗")
@@ -992,6 +1062,8 @@ def test_package_omits_local_data_and_api_key() -> None:
     assert "max-height:280px" in feed
     content_js = (ROOT / "extension" / "content.js").read_text(encoding="utf-8")
     assert "img.dataset.wfFull" in content_js
+    assert "shouldFillMore" in content_js
+    assert "FILL_VISIBLE" in content_js
     assert "微信群" not in feed
     assert "wf-origin-inline" not in feed
     assert 'class="wf-badge"' not in feed

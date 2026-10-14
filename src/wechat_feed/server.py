@@ -34,6 +34,7 @@ from .store import CardStore
 from .tokens import TokenIndex, allowed_chainicon_url, chain_favicon
 from .upstream import apply_display, backfill_history, fetch_upstream_groups, supervise
 from .wxemoji import (
+    STICKER_MAX,
     allowed_emote_url,
     allowed_sticker_url,
     decode_query_url,
@@ -374,6 +375,7 @@ def create_app() -> FastAPI:
         allow: Callable[[str], bool],
         *,
         cache_header: str = "private, max-age=604800, immutable",
+        timeout: float = 8.0,
     ) -> Response:
         if cache.is_file():
             blob = cache.read_bytes()
@@ -388,7 +390,7 @@ def create_app() -> FastAPI:
             remote = await feed_http.get_hops(
                 url,
                 allow,
-                timeout=8.0,
+                timeout=timeout,
                 headers={"User-Agent": "Mozilla/5.0"},
             )
         except feed_http.HopDenied as exc:
@@ -398,6 +400,12 @@ def create_app() -> FastAPI:
             logger.info("远程图片下载失败: {}", type(exc).__name__)
             raise HTTPException(status_code=502, detail="图片读不到") from exc
         if remote.status_code != 200 or not within_limit(remote.content, ceiling):
+            logger.info(
+                "远程图片不合格 status={} bytes={} ceiling={}",
+                remote.status_code,
+                len(remote.content),
+                ceiling,
+            )
             raise HTTPException(status_code=404, detail="图片读不到")
         mime = pick_mime(remote.content)
         if not mime:
@@ -420,8 +428,9 @@ def create_app() -> FastAPI:
         return await _cached_image(
             url,
             sticker_cache(data_dir() / "stickers", md5),
-            1_500_000,
+            STICKER_MAX,
             allowed_sticker_url,
+            timeout=20.0,
         )
 
     @app.get("/api/wxemote")

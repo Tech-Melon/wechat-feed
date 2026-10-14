@@ -10,7 +10,8 @@ from .wximage import sniff
 
 _MD5 = re.compile(r"^[0-9a-f]{32}$")
 _SLUG = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
-_STICKER_HOSTS = (".tc.qq.com", ".qpic.cn")
+_STICKER_HOSTS = (".tc.qq.com", ".qpic.cn", ".weixin.qq.com", ".gtimg.cn")
+STICKER_MAX = 4_000_000
 _EMOTE_HOSTS = (
     "cdn.jsdelivr.net",
     "fastly.jsdelivr.net",

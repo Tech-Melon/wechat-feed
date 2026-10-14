@@ -31,6 +31,9 @@
   let floatHost = null;
   let reconnectTimer = 0;
   let snapshotPending = false;
+  let fillPages = 0;
+  const FILL_VISIBLE = 24;
+  const FILL_PAGES = 16;
   let streamTimer = 0;
   let streamPoll = 0;
   let streamList = null;
@@ -1075,6 +1078,15 @@
     document.querySelectorAll("[data-wf-slot]").forEach((node) => node.remove());
   }
 
+  function shouldFillMore() {
+    if (!hasMore || snapshotPending || fillPages >= FILL_PAGES) return false;
+    if (floatWanted() && visibleCards(settings.float_ca_only).length < FILL_VISIBLE) return true;
+    if (overlayOn() && isFollowPage() && visibleCards(settings.gmgn_ca_only).length < FILL_VISIBLE) {
+      return true;
+    }
+    return false;
+  }
+
   function requestSnapshot(append) {
     if (!port) return;
     if (append && snapshotPending) return;
@@ -1082,6 +1094,7 @@
       cards.clear();
       oldest = 0;
       oldestReceived = 0;
+      fillPages = 0;
     }
     const payload = { type: "snapshot" };
     if (append && oldest) payload.before = oldest;
@@ -1133,6 +1146,10 @@
         for (const card of message.cards || []) remember(card, false);
         hasMore = Boolean(message.has_more);
         paintAll();
+        if (shouldFillMore()) {
+          fillPages += 1;
+          requestSnapshot(true);
+        }
       }
       if (message.type === "message") remember(message.card);
       if (message.type === "patch" && message.card) remember(message.card);
