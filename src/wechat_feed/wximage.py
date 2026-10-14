@@ -109,9 +109,18 @@ def ref_for(wx_dir: Path, room: str, name: str) -> str:
     return ""
 
 
+def _kind(path: Path) -> str:
+    name = path.name
+    if name.endswith("_t.dat"):
+        return "t"
+    if name.endswith("_h.dat"):
+        return "h"
+    return "orig"
+
+
 def load_image(
     wx_dir: Path, ref: str, aes_key: bytes | None, xor_key: int | None, *, hd: bool = False
-) -> tuple[bytes, str] | None:
+) -> tuple[bytes, str, str] | None:
     """按缩略图 / 高清优先级找第一张浏览器能显示的图。原图常是 wxgf（HEVC），跳过。"""
     for path in candidates(wx_dir, ref, hd=hd):
         try:
@@ -121,5 +130,5 @@ def load_image(
         blob = decode_dat(data, aes_key, xor_key)
         mime = sniff(blob) if blob else None
         if mime:
-            return blob, mime
+            return blob, mime, _kind(path)
     return None

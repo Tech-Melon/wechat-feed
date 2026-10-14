@@ -35,12 +35,19 @@ def default_settings() -> dict[str, Any]:
         "gmgn_overlay": False,
         "float_panel": False,
         "blocked_groups": [],
+        "blocked_users": [],
         "user_remarks": {},
         "group_remarks": {},
         "starred_users": [],
         "star_colors": {},
+        "group_users": {},
         "ca_only": False,
+        "gmgn_ca_only": False,
+        "float_ca_only": False,
+        "all_feed_groups": [],
+        "ca_feed_groups": [],
         "gmgn_api_key": "",
+        "mcap_format": "cn",
     }
 
 
@@ -115,6 +122,18 @@ _STAR_COLORS = {
 }
 
 
+def _clean_group_users(value: Any) -> dict[str, list[str]]:
+    if not isinstance(value, dict):
+        raise ValueError("群成员监听必须是对象")
+    if len(value) > GROUP_LIMIT:
+        raise ValueError(f"群成员监听最多 {GROUP_LIMIT} 个群")
+    cleaned: dict[str, list[str]] = {}
+    for key, users in value.items():
+        group_id = validate_group_id(str(key))
+        cleaned[group_id] = _clean_user_list(users, limit=200, label="群监听用户")
+    return cleaned
+
+
 def _clean_star_colors(value: Any) -> dict[str, str]:
     if not isinstance(value, dict):
         raise ValueError("星标颜色必须是对象")
@@ -179,13 +198,42 @@ def normalize_settings(raw: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(raw["ca_only"], bool):
             raise ValueError("只看 CA 开关必须是布尔值")
         merged["ca_only"] = raw["ca_only"]
+    if "gmgn_ca_only" in raw:
+        if not isinstance(raw["gmgn_ca_only"], bool):
+            raise ValueError("gmgn 只看 CA 开关必须是布尔值")
+        merged["gmgn_ca_only"] = raw["gmgn_ca_only"]
+    elif "ca_only" in raw:
+        merged["gmgn_ca_only"] = merged["ca_only"]
+    if "float_ca_only" in raw:
+        if not isinstance(raw["float_ca_only"], bool):
+            raise ValueError("浮窗只看 CA 开关必须是布尔值")
+        merged["float_ca_only"] = raw["float_ca_only"]
+    elif "ca_only" in raw:
+        merged["float_ca_only"] = merged["ca_only"]
+    if "all_feed_groups" in raw:
+        merged["all_feed_groups"] = _clean_id_list(
+            raw["all_feed_groups"], limit=GROUP_LIMIT, label="全部消息群"
+        )
+    if "ca_feed_groups" in raw:
+        merged["ca_feed_groups"] = _clean_id_list(
+            raw["ca_feed_groups"], limit=GROUP_LIMIT, label="只看 CA 群"
+        )
     if "gmgn_api_key" in raw:
         key = str(raw.get("gmgn_api_key") or "").strip()
         if key and (not key.startswith("gmgn_") or len(key) > 256):
             raise ValueError("GMGN API Key 格式不正确")
         merged["gmgn_api_key"] = key
+    if "mcap_format" in raw:
+        fmt = str(raw.get("mcap_format") or "cn").strip().lower()
+        if fmt not in {"cn", "en"}:
+            raise ValueError("市值格式只能是 cn 或 en")
+        merged["mcap_format"] = fmt
     if "blocked_groups" in raw:
         merged["blocked_groups"] = _clean_id_list(raw["blocked_groups"], limit=200, label="屏蔽群")
+    if "blocked_users" in raw:
+        merged["blocked_users"] = _clean_user_list(
+            raw["blocked_users"], limit=200, label="屏蔽用户"
+        )
     if "user_remarks" in raw:
         merged["user_remarks"] = _clean_remarks(raw["user_remarks"], label="用户备注")
     if "group_remarks" in raw:
@@ -198,6 +246,8 @@ def normalize_settings(raw: dict[str, Any]) -> dict[str, Any]:
         merged["star_colors"] = {
             user: color for user, color in merged["star_colors"].items() if user in starred
         }
+    if "group_users" in raw:
+        merged["group_users"] = _clean_group_users(raw["group_users"])
     if "groups" in raw:
         groups = raw["groups"]
         if not isinstance(groups, list):
@@ -219,16 +269,48 @@ def normalize_settings(raw: dict[str, Any]) -> dict[str, Any]:
         "gmgn_overlay",
         "float_panel",
         "blocked_groups",
+        "blocked_users",
         "user_remarks",
         "group_remarks",
         "starred_users",
         "star_colors",
+        "group_users",
         "ca_only",
+        "gmgn_ca_only",
+        "float_ca_only",
+        "all_feed_groups",
+        "ca_feed_groups",
         "gmgn_api_key",
+        "mcap_format",
     }
     if unknown:
         raise ValueError("含有不支持的配置项")
+    watched = {str(item["id"]) for item in merged.get("groups") or [] if item.get("id")}
+    if watched:
+        merged["group_users"] = {
+            key: users for key, users in (merged.get("group_users") or {}).items() if key in watched
+        }
     return merged
+
+
+def display_group_ids(settings: dict[str, Any], *, ca_only: bool) -> list[str]:
+    """当前显示模式勾选的群。空列表表示看监控里的全部群。"""
+    key = "ca_feed_groups" if ca_only else "all_feed_groups"
+    return [str(item) for item in (settings.get(key) or []) if item]
+
+
+def group_senders_by_id(settings: dict[str, Any]) -> dict[str, list[str]]:
+    """只监听部分用户的群。缺这个键表示全员；空数组表示这个群暂时谁都不显示。"""
+    mapping = settings.get("group_users") or {}
+    if not isinstance(mapping, dict):
+        return {}
+    cleaned: dict[str, list[str]] = {}
+    for key, users in mapping.items():
+        group_id = str(key or "")
+        if not group_id:
+            continue
+        cleaned[group_id] = [str(item) for item in (users or []) if item]
+    return cleaned
 
 
 class SettingsStore:

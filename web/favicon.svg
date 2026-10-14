@@ -1,7 +1,12 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="技术瓜群流">
   <rect width="128" height="128" rx="28" fill="#111827"/>
-  <path d="M24 62c0-20 18-36 40-36s40 16 40 36-18 36-40 36c-5 0-9-.6-13-1.8L26 106l5-16C27 82 24 73 24 62z" fill="#12B76A"/>
-  <circle cx="52" cy="62" r="5.5" fill="#F8FAFC"/>
-  <circle cx="64" cy="62" r="5.5" fill="#F8FAFC"/>
-  <circle cx="76" cy="62" r="5.5" fill="#F8FAFC"/>
+  <path d="M24 62c0-20 18-36 40-36s40 16 40 36-18 36-40 36c-5 0-9-.6-13-1.8L26 106l5-16C27 82 24 73 24 62z" fill="#16a34a"/>
+  <ellipse cx="64" cy="60" rx="33" ry="29" fill="#fefce8"/>
+  <ellipse cx="64" cy="60" rx="28" ry="24" fill="#e11d48"/>
+  <ellipse cx="52" cy="48" rx="10" ry="6" fill="#fb7185" opacity=".45"/>
+  <circle cx="52" cy="60" r="5" fill="#f8fafc"/>
+  <circle cx="64" cy="62" r="5" fill="#f8fafc"/>
+  <circle cx="76" cy="60" r="5" fill="#f8fafc"/>
+  <path d="M93 22c16-9 26 6 17 18-10-3-15-8-17-18z" fill="#86efac"/>
+  <path d="M93 22c3 8 10 14 17 18" fill="none" stroke="#166534" stroke-width="2" stroke-linecap="round"/>
 </svg>

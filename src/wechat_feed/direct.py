@@ -12,6 +12,7 @@ from typing import Any
 import httpx
 from loguru import logger
 
+from .http import client as http_client
 from .wechatdb import WeChatDB
 
 _RETRY_AFTER = 30.0
@@ -26,18 +27,20 @@ def direct_disabled() -> bool:
 async def fetch_key_from_wda(upstream_base: str) -> dict[str, str] | None:
     base = upstream_base.rstrip("/")
     timeout = httpx.Timeout(30.0, connect=3.0)
-    async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
-        status = (await client.get(f"{base}/api/chat/realtime/status")).json()
-        realtime = status.get("realtime") or {}
-        account = str(status.get("account") or realtime.get("account") or "")
-        db_dir = str(realtime.get("db_storage_dir") or "")
-        if not account or not db_dir:
-            return None
-        payload = (
-            await client.get(
-                f"{base}/api/keys", params={"account": account, "db_storage_path": db_dir}
-            )
-        ).json()
+    client = http_client()
+    status = (await client.get(f"{base}/api/chat/realtime/status", timeout=timeout)).json()
+    realtime = status.get("realtime") or {}
+    account = str(status.get("account") or realtime.get("account") or "")
+    db_dir = str(realtime.get("db_storage_dir") or "")
+    if not account or not db_dir:
+        return None
+    payload = (
+        await client.get(
+            f"{base}/api/keys",
+            params={"account": account, "db_storage_path": db_dir},
+            timeout=timeout,
+        )
+    ).json()
     keys = payload.get("keys") or {}
     key = str(keys.get("db_key") or "")
     if len(key) != 64:

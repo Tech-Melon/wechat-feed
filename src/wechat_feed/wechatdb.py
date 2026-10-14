@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import hashlib
+import html
 import re
 import threading
 import time
@@ -47,6 +48,8 @@ _QUOTE_LABELS = {
     47: "[表情]",
     48: "[位置]",
 }
+_EMOJI_MD5 = re.compile(r"^[0-9a-f]{32}$")
+_STICKER_SOFT_MAX = 400_000
 
 
 def derive_key(raw_key: bytes, salt: bytes) -> bytes:
@@ -96,6 +99,34 @@ def _find_text(node: ET.Element | None, path: str) -> str:
     return (found.text or "").strip() if found is not None and found.text else ""
 
 
+def _appmsg_url(appmsg: ET.Element | None) -> str:
+    for path in ("url", "weburl"):
+        url = _find_text(appmsg, path)
+        if url.startswith("http://") or url.startswith("https://"):
+            return url
+    return ""
+
+
+def _parse_emoji(text: str) -> dict[str, Any]:
+    node = _xml(text)
+    el = node.find("emoji") if node is not None else None
+    out: dict[str, Any] = {"renderType": "emoji", "content": ""}
+    if el is None:
+        return out
+    md5 = (el.get("md5") or "").strip().lower()
+    cdn = html.unescape((el.get("cdnurl") or "").strip())
+    thumb = html.unescape((el.get("thumburl") or "").strip())
+    try:
+        length = int(el.get("len") or 0)
+    except ValueError:
+        length = 0
+    url = thumb if thumb and length > _STICKER_SOFT_MAX else (cdn or thumb)
+    if _EMOJI_MD5.fullmatch(md5) and url.startswith("http"):
+        out["wxEmoji"] = md5
+        out["emojiUrl"] = url
+    return out
+
+
 def _quote_content(refer: ET.Element) -> str:
     try:
         kind = int(_find_text(refer, "type") or 0)
@@ -105,7 +136,13 @@ def _quote_content(refer: ET.Element) -> str:
     if kind == 1:
         return strip_sender(content, _find_text(refer, "chatusr"))
     if kind == 49:
-        title = _find_text(_xml(content), "appmsg/title") if content else ""
+        node = _xml(content) if content else None
+        title = _find_text(node, "appmsg/title")
+        url = _appmsg_url(node.find("appmsg") if node is not None else None)
+        if title and url:
+            return f"{title}\n{url}"
+        if url:
+            return url
         return f"[链接] {title}" if title else "[链接]"
     return _QUOTE_LABELS.get(kind, "[消息]")
 
@@ -144,6 +181,8 @@ def parse_row(
             except ValueError:
                 seconds = 0
             return {"renderType": "voice", "content": f"[语音 {seconds}秒]" if seconds else ""}
+        if render == "emoji":
+            return _parse_emoji(text)
         return {"renderType": render, "content": ""}
     if base == 42:
         return {"renderType": "text", "content": "[名片]"}
@@ -173,7 +212,11 @@ def parse_row(
         if render == "transfer":
             amount = _find_text(appmsg, "wcpayinfo/feedesc")
             return {"renderType": "transfer", "content": "", "amount": amount}
-        return {"renderType": render, "content": "", "title": title}
+        row = {"renderType": render, "content": "", "title": title}
+        url = _appmsg_url(appmsg)
+        if url:
+            row["linkUrl"] = url
+        return row
     return None
 
 
@@ -239,7 +282,7 @@ def room_nicknames(ext_buffer: bytes | None) -> dict[str, str]:
             member = {n: v for n, w, v in _proto_fields(value) if w == 2}
             ident = member.get(1, b"").decode("utf-8", "replace")
             nick = member.get(2, b"").decode("utf-8", "replace")
-            if ident and nick:
+            if ident:
                 members[ident] = nick
     except ValueError:
         return members
@@ -512,6 +555,77 @@ class WeChatDB:
         month = time.strftime("%Y-%m", time.localtime(int(row[0] or 0)))
         return f"{table[4:]}/{month}/{name}"
 
+    def emoji_media(self, message_id: str) -> tuple[str, str]:
+        """按直读消息 id 重新取出贴纸 md5 和 CDN。"""
+        stem, _, rest = str(message_id).partition(":")
+        table, _, local_id = rest.partition(":")
+        if not _SHARD.match(f"{stem}.db") or not re.fullmatch(r"Msg_[0-9a-f]{32}", table):
+            return "", ""
+        if not local_id.isdigit():
+            return "", ""
+        path = self.db_dir / "message" / f"{stem}.db"
+        if not path.exists():
+            return "", ""
+        with self._lock:
+            row = (
+                self._open(path)
+                .execute(
+                    f"SELECT real_sender_id, message_content FROM [{table}] WHERE local_id = ?",
+                    (int(local_id),),
+                )
+                .fetchone()
+            )
+            if not row:
+                return "", ""
+            sender = self._sender(path, int(row[0] or 0))
+            content = decode_content(row[1])
+        parsed = parse_row(local_type=47, sender=sender, content=content)
+        if not parsed:
+            return "", ""
+        return str(parsed.get("wxEmoji") or ""), str(parsed.get("emojiUrl") or "")
+
+    def _contacts_many(self, usernames: list[str]) -> dict[str, tuple[str, str]]:
+        now = time.time()
+        found: dict[str, tuple[str, str]] = {}
+        missing: list[str] = []
+        for name in usernames:
+            cached = self._contacts.get(name)
+            if cached and now - cached[0] < _NAME_TTL:
+                found[name] = (cached[1], cached[2])
+            else:
+                missing.append(name)
+        if not missing:
+            return found
+        conn = self._open(self.db_dir / "contact" / "contact.db")
+        fetched: dict[str, tuple[str, str]] = {}
+        for table in ("contact", "stranger"):
+            leftover = [item for item in missing if item not in fetched]
+            if not leftover:
+                break
+            for start in range(0, len(leftover), 200):
+                chunk = leftover[start : start + 200]
+                placeholders = ",".join("?" * len(chunk))
+                rows = conn.execute(
+                    f"SELECT username, remark, nick_name FROM {table} "
+                    f"WHERE username IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+                for row in rows:
+                    fetched[str(row[0])] = (str(row[1] or ""), str(row[2] or ""))
+        for name in missing:
+            remark, nick = fetched.get(name, ("", ""))
+            self._contacts[name] = (now, remark, nick)
+            found[name] = (remark, nick)
+        return found
+
+    def _group_names(self, rooms: list[str]) -> dict[str, str]:
+        contacts = self._contacts_many(rooms)
+        names: dict[str, str] = {}
+        for room in rooms:
+            remark, nick = contacts.get(room, ("", ""))
+            names[room] = remark or nick
+        return names
+
     def groups(self, limit: int = 400) -> list[dict[str, str]]:
         with self._lock:
             conn = self._open(self.db_dir / "session" / "session.db")
@@ -520,7 +634,31 @@ class WeChatDB:
                 "ORDER BY sort_timestamp DESC LIMIT ?",
                 (int(limit),),
             ).fetchall()
-            return [{"id": str(row[0]), "name": self._group_name(str(row[0]))} for row in rows]
+            ids = [str(row[0]) for row in rows]
+            names = self._group_names(ids)
+            return [{"id": item, "name": names.get(item, "")} for item in ids]
+
+    def members(self, room: str) -> list[dict[str, str]]:
+        """现场读 chat_room.ext_buffer，联系人名走短 TTL 缓存，不落盘。"""
+        with self._lock:
+            self._rooms.pop(room, None)
+            nicks = self._room(room)
+            contacts = self._contacts_many(list(nicks))
+            out: list[dict[str, str]] = []
+            for ident, room_nick in nicks.items():
+                remark, nick = contacts.get(ident, ("", ""))
+                name = room_nick or remark or nick or ident
+                out.append(
+                    {
+                        "id": ident,
+                        "name": name,
+                        "roomNick": room_nick,
+                        "remark": remark,
+                        "nick": nick,
+                    }
+                )
+            out.sort(key=lambda item: item["name"].casefold())
+            return out
 
     def avatar(self, username: str) -> bytes | None:
         path = self.db_dir / "head_image" / "head_image.db"

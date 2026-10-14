@@ -49,6 +49,7 @@ def _visible_text(message: dict[str, Any]) -> str:
     content = _as_text(message.get("content"))
     title = _as_text(message.get("title"))
     transcript = _as_text(message.get("voiceTranscript"))
+    link_url = _as_text(message.get("linkUrl") or message.get("url"))
     if render_type == "voice" and transcript:
         content = transcript
     elif render_type == "transfer":
@@ -58,8 +59,11 @@ def _visible_text(message: dict[str, Any]) -> str:
     elif render_type == "location":
         label = _as_text(message.get("locationLabel")) or _as_text(message.get("locationPoiname"))
         content = f"[位置] {label}".strip()
-    elif not content and title and render_type in {"link", "file"}:
-        content = title
+    elif not content and render_type in {"link", "file"}:
+        if title and link_url and link_url not in title:
+            content = f"{title}\n{link_url}"
+        else:
+            content = title or link_url
     if not content:
         content = _MEDIA_LABELS.get(render_type, "")
     if _XML_PREFIX.match(content):
@@ -134,11 +138,18 @@ def normalize_message_event(event: dict[str, Any], *, demo: bool = False) -> dic
     )
     media_full = ""
     wx_image = _as_text(message.get("wxImage"))
+    wx_emoji = _as_text(message.get("wxEmoji"))
+    emoji_url = _as_text(message.get("emojiUrl"))
     if wx_image:
         media_url = "/api/wximg?ref=" + quote(wx_image, safe="")
         media_full = media_url + "&hd=1"
+    elif wx_emoji and emoji_url:
+        media_url = (
+            "/api/wxemoji?md5=" + quote(wx_emoji, safe="") + "&u=" + quote(emoji_url, safe="")
+        )
     elif raw_media.startswith("http://127.0.0.1:") or raw_media.startswith("http://localhost:"):
         media_url = "/api/media?u=" + quote(raw_media, safe="")
+    link_url = _as_text(message.get("linkUrl") or message.get("url"))
     return {
         "id": message_id,
         "localId": local_id,
@@ -158,6 +169,7 @@ def normalize_message_event(event: dict[str, Any], *, demo: bool = False) -> dic
         "tokenCards": [],
         "mediaUrl": media_url,
         "mediaFullUrl": media_full,
+        "linkUrl": link_url,
         "isSent": bool(message.get("isSent")),
         "demo": demo,
         "receivedAt": int(time.time() * 1000),

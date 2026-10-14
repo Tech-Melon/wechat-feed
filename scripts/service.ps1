@@ -59,7 +59,9 @@ function Install-Autostart {
     $shortcut.TargetPath = $pythonw
     $shortcut.Arguments = "-m wechat_feed serve"
     $shortcut.WorkingDirectory = $root
-    $shortcut.Description = "微信群信息流本地服务"
+    $shortcut.Description = "技术瓜群流本地服务"
+    $icon = Join-Path $root "extension\icon.ico"
+    if (Test-Path $icon) { $shortcut.IconLocation = $icon }
     $shortcut.Save()
     Write-Host "已开启开机自启：$link"
 }

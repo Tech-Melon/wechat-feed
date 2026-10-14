@@ -88,7 +88,9 @@ class Hub:
         self.mark_event(int(card.get("receivedAt") or 0))
         if notify:
             self._broadcast({"type": "message", "card": card})
-        if self._persist is not None and self._persist.has_ca(card):
+        if self._persist is None:
+            return True
+        if self._persist.has_ca(card):
             self._persist.fill_context(card)
             self._persist.update_fields(
                 card_id,
@@ -99,7 +101,8 @@ class Hub:
             )
             if notify:
                 self._broadcast({"type": "patch", "id": card_id, "card": card})
-            self._refresh_sender_ca_context(card)
+        # 普通发言也要刷新同群同发送者更早 CA 卡的后三句。
+        self._refresh_sender_ca_context(card)
         return True
 
     def _refresh_sender_ca_context(self, card: dict[str, Any]) -> None:

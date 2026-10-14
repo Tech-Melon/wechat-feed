@@ -2,14 +2,17 @@
 <html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
-    <title>微信群信息流</title>
+    <title>技术瓜群流</title>
     <link rel="stylesheet" href="popup.css" />
   </head>
   <body>
     <header class="top">
       <div class="brand">
-        <strong>微信群信息流</strong>
-        <span id="status" class="status">正在检查本地服务</span>
+        <img src="icon.png" width="28" height="28" alt="技术瓜群流" />
+        <div>
+          <strong>技术瓜群流</strong>
+          <span id="status" class="status">正在检查本地服务</span>
+        </div>
       </div>
       <button id="open" type="button" class="chip" title="打开本地页面 127.0.0.1:8765">本地页 ↗</button>
     </header>
@@ -26,10 +29,37 @@
         <span><b>插入 gmgn 推特流</b><small>微信消息按时间插在推文之间</small></span>
         <input id="gmgn" type="checkbox" class="toggle" />
       </label>
+      <div class="surface-mode" data-surface="gmgn">
+        <span>该通路显示</span>
+        <button type="button" data-mode="all">全部消息</button>
+        <button type="button" data-mode="ca">只看 CA</button>
+      </div>
       <label class="item">
         <span><b>网页浮窗</b><small>只在「设置」里的白名单网址出现</small></span>
         <input id="float-panel" type="checkbox" class="toggle" />
       </label>
+      <div class="surface-mode" data-surface="float">
+        <span>该通路显示</span>
+        <button type="button" data-mode="all">全部消息</button>
+        <button type="button" data-mode="ca">只看 CA</button>
+      </div>
+      <div class="surface-mode" data-numfmt>
+        <span>市值 / 池子</span>
+        <button type="button" data-mcap-format="cn">万 / 亿</button>
+        <button type="button" data-mcap-format="en">10.5K</button>
+      </div>
+      <details class="group-mgr" open>
+        <summary>群聊选择管理</summary>
+        <p class="hint">两套来源互不影响，可同时多选。全选表示包括以后新加的监控群。点「成员」可监听全员或只听部分人，也可星标、屏蔽某人。监控群消息仍全盘入库，这里只决定显示谁。</p>
+        <div class="gcol">
+          <h4>全部消息来源</h4>
+          <div id="groups-all" class="group-list"></div>
+        </div>
+        <div class="gcol">
+          <h4>只看 CA 来源</h4>
+          <div id="groups-ca" class="group-list"></div>
+        </div>
+      </details>
     </section>
 
     <section data-panel="sound" hidden>
@@ -85,7 +115,7 @@
         <input id="voice-volume" type="range" min="0" max="100" step="5" />
         <span id="voice-volume-text"></span>
       </label>
-      <p class="hint">一条消息只响一种：合约 &gt; 星标用户 &gt; 普通消息。选文件时弹窗被关掉，<a id="voice-tab" href="#">在标签页里打开</a>再选。</p>
+      <p class="hint">一条消息只响一种：合约 &gt; 星标用户 &gt; 普通消息。提示音跟群来源一致：只勾了「只看 CA」的群，普通消息不响。选文件时弹窗被关掉，<a id="voice-tab" href="#">在标签页里打开</a>再选。</p>
     </section>
 
     <section data-panel="more" hidden>
@@ -94,9 +124,6 @@
       </label>
       <p class="hint">域名、路径和写出的参数要一致，网址多出的参数不影响。</p>
       <button id="save-sites" type="button" class="ghost">保存白名单</button>
-      <label class="field"><span>卡片水印 <small>留空用默认</small></span>
-        <input id="watermark" type="text" maxlength="40" placeholder="关注 X: @0xTechMelon" />
-      </label>
       <label class="field"><span>GMGN OpenAPI Key <small id="key-state"></small></span>
         <input id="key" type="password" placeholder="gmgn_..." autocomplete="off" />
       </label>
@@ -105,9 +132,10 @@
     </section>
 
     <footer class="links">
-      <a href="https://x.com/0xTechMelon" target="_blank" rel="noreferrer">𝕏 关注 @0xTechMelon</a>
+      <a href="https://x.com/0xTechMelon" target="_blank" rel="noreferrer">𝕏 @0xTechMelon</a>
       <a href="https://docs.jishugua.top" target="_blank" rel="noreferrer">产品导航 docs.jishugua.top</a>
     </footer>
+    <script src="feed.js"></script>
     <script src="popup.js"></script>
   </body>
 </html>

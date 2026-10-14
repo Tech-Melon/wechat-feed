@@ -43,6 +43,297 @@ function send(type, payload = {}, attempt = 0) {
   });
 }
 
+function groupLabel(settings, groupId, fallback) {
+  const remark = (settings.group_remarks || {})[groupId];
+  if (remark) return remark;
+  const watched = (settings.groups || []).find((item) => item.id === groupId);
+  if (watched && watched.name && !String(watched.name).endsWith("@chatroom")) return watched.name;
+  if (fallback && !String(fallback).endsWith("@chatroom")) return fallback;
+  return "未命名群";
+}
+
+function paintSurfaceModes(settings) {
+  for (const root of document.querySelectorAll(".surface-mode")) {
+    if (root.dataset.numfmt !== undefined) {
+      const fmt = settings.mcap_format === "en" ? "en" : "cn";
+      for (const button of root.querySelectorAll("[data-mcap-format]")) {
+        button.classList.toggle("on", button.dataset.mcapFormat === fmt);
+      }
+      continue;
+    }
+    const key = root.dataset.surface === "gmgn" ? "gmgn_ca_only" : "float_ca_only";
+    const caOnly = Boolean(settings[key]);
+    for (const button of root.querySelectorAll("[data-mode]")) {
+      button.classList.toggle("on", button.dataset.mode === (caOnly ? "ca" : "all"));
+    }
+  }
+}
+
+const expandedGroups = new Set();
+const memberCache = new Map();
+const memberQuery = new Map();
+
+function refreshGroupLists(settings) {
+  fillGroupList(document.querySelector("#groups-all"), settings, "all_feed_groups");
+  fillGroupList(document.querySelector("#groups-ca"), settings, "ca_feed_groups");
+}
+
+function pickStarColor(anchor, current) {
+  const colors = window.WechatFeed?.starColors || [];
+  return new Promise((resolve) => {
+    const host = document.createElement("div");
+    host.className = "star-palette";
+    const rect = anchor.getBoundingClientRect();
+    host.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - 210))}px`;
+    host.style.top = `${Math.min(rect.bottom + 6, window.innerHeight - 88)}px`;
+    host.innerHTML = `${colors
+      .map((item) => `<button type="button" data-color="${item.id}" title="${item.name}" style="background:${item.hex};outline:${current === item.id ? "2px solid #111" : "none"}"></button>`)
+      .join("")}<button type="button" data-color="">取消</button>`;
+    const close = (value) => {
+      host.remove();
+      document.removeEventListener("mousedown", outside);
+      resolve(value);
+    };
+    const outside = (event) => {
+      if (!host.contains(event.target)) close(null);
+    };
+    host.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-color]");
+      if (!button) return;
+      close(button.dataset.color);
+    });
+    document.body.append(host);
+    setTimeout(() => document.addEventListener("mousedown", outside), 0);
+  });
+}
+
+async function ensureMembers(groupId) {
+  const cached = memberCache.get(groupId);
+  if (cached && Date.now() - cached.at < 15000) return cached.members;
+  const result = await send("getGroupMembers", { groupId });
+  if (!result?.ok) throw new Error(result?.detail || "读不到成员");
+  const members = result.members || [];
+  memberCache.set(groupId, { at: Date.now(), members });
+  return members;
+}
+
+function renderMemberPanel(panel, settings, groupId, members) {
+  panel.replaceChildren();
+  const users = window.WechatFeed.groupListenUsers(settings, groupId);
+  const partial = users !== null;
+  const mode = document.createElement("div");
+  mode.className = "listen-mode";
+  const allBtn = document.createElement("button");
+  allBtn.type = "button";
+  allBtn.textContent = "监听全员";
+  allBtn.classList.toggle("on", !partial);
+  const partBtn = document.createElement("button");
+  partBtn.type = "button";
+  partBtn.textContent = "只听部分";
+  partBtn.classList.toggle("on", partial);
+  allBtn.addEventListener("click", () => {
+    send("setGroupUsers", { groupId, users: null }).then((state) => {
+      if (state?.ok) show(state);
+      else note(state?.detail || "没有保存成功", true);
+    });
+  });
+  partBtn.addEventListener("click", () => {
+    send("setGroupUsers", { groupId, users: users || [] }).then((state) => {
+      if (state?.ok) show(state);
+      else note(state?.detail || "没有保存成功", true);
+    });
+  });
+  mode.append(allBtn, partBtn);
+  panel.append(mode);
+  if (partial && !users.length) {
+    const hint = document.createElement("p");
+    hint.className = "hint";
+    hint.textContent = "勾选要听的人。现在这个群不会显示任何人。";
+    panel.append(hint);
+  }
+  const filter = document.createElement("input");
+  filter.type = "search";
+  filter.className = "member-filter";
+  filter.placeholder = "筛选成员";
+  filter.value = memberQuery.get(groupId) || "";
+  const list = document.createElement("div");
+  list.className = "member-list";
+  const starred = new Set(settings.starred_users || []);
+  const muted = new Set(settings.blocked_users || []);
+  const listenSet = new Set(users || []);
+  const needle = filter.value.trim().toLowerCase();
+  const rank = (id) => (muted.has(id) ? 2 : starred.has(id) ? 0 : 1);
+  const sorted = members.slice().sort((a, b) => {
+    const diff = rank(a.id) - rank(b.id);
+    if (diff) return diff;
+    return String(a.name || a.id).localeCompare(String(b.name || b.id), "zh");
+  });
+  for (const member of sorted) {
+    const row = document.createElement("div");
+    row.className = "member-row";
+    row.dataset.id = member.id;
+    row.dataset.name = member.name || "";
+    const hit = String(member.name || "").toLowerCase().includes(needle) || member.id.toLowerCase().includes(needle);
+    row.hidden = Boolean(needle) && !hit;
+    if (partial) {
+      const check = document.createElement("input");
+      check.type = "checkbox";
+      check.checked = listenSet.has(member.id);
+      check.addEventListener("change", () => {
+        const next = new Set(users || []);
+        if (check.checked) next.add(member.id);
+        else next.delete(member.id);
+        send("setGroupUsers", { groupId, users: Array.from(next) }).then((state) => {
+          if (state?.ok) show(state);
+          else note(state?.detail || "没有保存成功", true);
+        });
+      });
+      row.append(check);
+    }
+    const img = document.createElement("img");
+    img.src = `http://127.0.0.1:8765/api/avatar?username=${encodeURIComponent(member.id)}`;
+    img.alt = "";
+    img.addEventListener("error", () => img.remove());
+    const name = document.createElement("span");
+    name.className = "name";
+    name.textContent = member.name || member.id;
+    name.title = member.id;
+    const star = document.createElement("button");
+    star.type = "button";
+    star.className = `member-star${starred.has(member.id) ? " on" : ""}`;
+    star.textContent = starred.has(member.id) ? "★" : "☆";
+    star.title = starred.has(member.id) ? "改星标颜色或取消" : "星标这个人";
+    star.addEventListener("click", async () => {
+      const colors = settings.star_colors || {};
+      const picked = await pickStarColor(star, starred.has(member.id) ? colors[member.id] || "amber" : "");
+      if (picked === null) return;
+      const state = await send("starUser", {
+        userId: member.id,
+        starred: Boolean(picked),
+        color: picked || "amber",
+      });
+      if (state?.ok) show(state.settings ? state : await send("getState"));
+      else note(state?.detail || "没有保存成功", true);
+    });
+    const mute = document.createElement("button");
+    mute.type = "button";
+    mute.className = `member-mute${muted.has(member.id) ? " on" : ""}`;
+    mute.textContent = muted.has(member.id) ? "已屏蔽" : "屏蔽";
+    mute.title = muted.has(member.id) ? "恢复这个人的发言" : "不看这个人的发言";
+    mute.addEventListener("click", async () => {
+      const state = await send("muteUser", {
+        userId: member.id,
+        blocked: !muted.has(member.id),
+      });
+      if (state?.ok) show(state.settings ? state : await send("getState"));
+      else note(state?.detail || "没有保存成功", true);
+    });
+    if (muted.has(member.id)) row.classList.add("is-blocked");
+    row.append(img, name, star, mute);
+    list.append(row);
+  }
+  if (!members.length) {
+    const empty = document.createElement("p");
+    empty.className = "hint";
+    empty.textContent = "这个群暂时读不到成员。";
+    list.append(empty);
+  }
+  filter.addEventListener("input", () => {
+    memberQuery.set(groupId, filter.value);
+    const text = filter.value.trim().toLowerCase();
+    for (const row of list.querySelectorAll(".member-row")) {
+      const name = (row.dataset.name || "").toLowerCase();
+      const id = (row.dataset.id || "").toLowerCase();
+      row.hidden = Boolean(text) && !name.includes(text) && !id.includes(text);
+    }
+  });
+  panel.append(filter, list);
+}
+
+function fillGroupList(box, settings, storedKey) {
+  if (!box) return;
+  const top = box.scrollTop;
+  const monitored = window.WechatFeed.monitoredGroupIds(settings);
+  const stored = settings[storedKey] || [];
+  const selected = new Set(window.WechatFeed.selectedFeedGroups(stored, monitored));
+  const allOn = !stored.length;
+  box.replaceChildren();
+  const allLabel = document.createElement("label");
+  const allBox = document.createElement("input");
+  allBox.type = "checkbox";
+  allBox.checked = allOn;
+  allLabel.append(allBox, document.createTextNode("全选监控群"));
+  allBox.addEventListener("change", () => {
+    send("setFeedGroups", { caOnly: storedKey === "ca_feed_groups", groups: [] }).then((next) => {
+      if (next?.ok) show(next);
+      else note(next?.detail || "没有保存成功", true);
+    });
+  });
+  box.append(allLabel);
+  for (const item of settings.groups || []) {
+    if ((settings.blocked_groups || []).includes(item.id)) continue;
+    const wrap = document.createElement("div");
+    wrap.className = "group-item";
+    const row = document.createElement("div");
+    row.className = "group-row";
+    const label = document.createElement("label");
+    const check = document.createElement("input");
+    check.type = "checkbox";
+    check.checked = selected.has(item.id);
+    const listen = window.WechatFeed.groupListenUsers(settings, item.id);
+    const title = groupLabel(settings, item.id, item.name);
+    label.append(check, document.createTextNode(title));
+    check.addEventListener("change", () => {
+      const current = settings[storedKey] || [];
+      const next = window.WechatFeed.nextFeedGroups(current, item.id, monitored);
+      send("setFeedGroups", { caOnly: storedKey === "ca_feed_groups", groups: next }).then((state) => {
+        if (state?.ok) show(state);
+        else note(state?.detail || "没有保存成功", true);
+      });
+    });
+    const membersBtn = document.createElement("button");
+    membersBtn.type = "button";
+    membersBtn.className = "group-members";
+    membersBtn.textContent = listen === null ? "成员" : `${listen.length}人`;
+    membersBtn.title = listen === null ? "查看成员、星标、屏蔽、只听部分人" : "正在只听部分用户";
+    membersBtn.addEventListener("click", () => {
+      if (expandedGroups.has(item.id)) expandedGroups.delete(item.id);
+      else expandedGroups.add(item.id);
+      refreshGroupLists(settings);
+    });
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "group-remove";
+    remove.textContent = "移除";
+    remove.addEventListener("click", () => {
+      send("unwatchGroup", { groupId: item.id }).then((state) => {
+        if (state?.ok) show(state);
+        else note(state?.detail || "没有保存成功", true);
+      });
+    });
+    row.append(label, membersBtn, remove);
+    wrap.append(row);
+    if (expandedGroups.has(item.id)) {
+      const panel = document.createElement("div");
+      panel.className = "member-panel";
+      const cached = memberCache.get(item.id);
+      if (cached && Date.now() - cached.at < 15000) {
+        renderMemberPanel(panel, settings, item.id, cached.members);
+      } else {
+        panel.textContent = "正在读取成员…";
+        ensureMembers(item.id)
+          .then(() => refreshGroupLists(settings))
+          .catch((error) => {
+            panel.textContent = error.message;
+          });
+      }
+      wrap.append(panel);
+    }
+    box.append(wrap);
+  }
+  box.scrollTop = top;
+}
+
 function show(state) {
   checkbox.disabled = false;
   floatBox.disabled = false;
@@ -50,6 +341,9 @@ function show(state) {
   if (state.ok) {
     checkbox.checked = Boolean(state.enabled);
     floatBox.checked = Boolean(state.float_panel);
+    const settings = state.settings || {};
+    paintSurfaceModes(settings);
+    refreshGroupLists(settings);
     status.className = "status ok";
     status.textContent = `本地服务已连接${state.has_gmgn_key ? " · GMGN Key 已保存" : ""}`;
     keyState.textContent = state.has_gmgn_key ? "（已保存）" : "（未填写，可选）";
@@ -85,6 +379,26 @@ async function toggle(box, type) {
 
 checkbox.addEventListener("change", () => toggle(checkbox, "setOverlay"));
 floatBox.addEventListener("change", () => toggle(floatBox, "setFloatPanel"));
+
+for (const root of document.querySelectorAll(".surface-mode")) {
+  root.addEventListener("click", async (event) => {
+    const fmtBtn = event.target.closest("[data-mcap-format]");
+    if (fmtBtn) {
+      const state = await send("setMcapFormat", { format: fmtBtn.dataset.mcapFormat });
+      if (state?.ok) show(state);
+      else note(state?.detail || "没有保存成功", true);
+      return;
+    }
+    const button = event.target.closest("[data-mode]");
+    if (!button) return;
+    const state = await send("setSurfaceMode", {
+      surface: root.dataset.surface,
+      enabled: button.dataset.mode === "ca",
+    });
+    if (state?.ok) show(state);
+    else note(state?.detail || "没有保存成功", true);
+  });
+}
 
 document.querySelector("#save-key").addEventListener("click", async () => {
   const key = keyInput.value.trim();
@@ -131,14 +445,6 @@ document.querySelector("#save-sites").addEventListener("click", () => {
       ? `已保存 ${sites.length} 个网址，新加的网站刷新后出现浮窗。`
       : "白名单已清空，浮窗不会在任何网页出现。");
   });
-});
-
-const watermark = document.querySelector("#watermark");
-chrome.storage.local.get("watermark", ({ watermark: stored }) => {
-  watermark.value = typeof stored === "string" ? stored : "";
-});
-watermark.addEventListener("change", () => {
-  chrome.storage.local.set({ watermark: watermark.value.trim() }, () => note("水印已更新。"));
 });
 
 const voiceVolume = document.querySelector("#voice-volume");

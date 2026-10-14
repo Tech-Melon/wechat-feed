@@ -6,26 +6,55 @@ const state = {
     gmgn_overlay: false,
     float_panel: false,
     blocked_groups: [],
+    blocked_users: [],
     user_remarks: {},
     group_remarks: {},
     starred_users: [],
+    group_users: {},
     ca_only: false,
+    gmgn_ca_only: false,
+    float_ca_only: false,
+    all_feed_groups: [],
+    ca_feed_groups: [],
   },
   runtime: { upstream: "idle", detail: "正在读取状态" },
   messages: [],
   directory: [],
   directoryQuery: "",
   query: "",
-  activeGroup: "",
   hasMore: false,
   oldest: 0,
   oldestReceived: 0,
   loadingMore: false,
+  feeds: {
+    all: emptyFeedCache(),
+    ca: emptyFeedCache(),
+  },
 };
+
+function emptyFeedCache() {
+  return { messages: [], hasMore: false, oldest: 0, oldestReceived: 0, loaded: false, loading: false };
+}
+
+function feedKey(caOnly = Boolean(state.settings.ca_only)) {
+  return caOnly ? "ca" : "all";
+}
+
+function activeCache() {
+  return state.feeds[feedKey()];
+}
+
+function syncViewFromCache() {
+  const cache = activeCache();
+  state.messages = cache.messages;
+  state.hasMore = cache.hasMore;
+  state.oldest = cache.oldest;
+  state.oldestReceived = cache.oldestReceived;
+  state.loadingMore = cache.loading;
+}
 
 const feed = document.querySelector("#feed");
 const more = document.querySelector("#more");
-const groups = document.querySelector("#groups");
 const blockedBox = document.querySelector("#blocked");
 const directory = document.querySelector("#directory");
 const directorySearch = document.querySelector(".directory-search");
@@ -42,17 +71,21 @@ function setNotice(text) {
   notice.textContent = text || "";
 }
 
-function groupLabel(groupId, fallback) {
-  if (!groupId) return "全部群";
-  const remark = (state.settings.group_remarks || {})[groupId];
-  if (remark) return remark;
+function watchedGroupName(groupId, fallback) {
   const watched = (state.settings.groups || []).find((item) => item.id === groupId);
   if (watched && watched.name && !String(watched.name).endsWith("@chatroom")) return watched.name;
   if (fallback && !String(fallback).endsWith("@chatroom")) return fallback;
   const fromMsg = state.messages.find((item) => item.conversationId === groupId);
-  const fromName = fromMsg && (fromMsg.conversationName || fromMsg.displayGroup);
+  const fromName = fromMsg && fromMsg.conversationName;
   if (fromName && !String(fromName).endsWith("@chatroom")) return fromName;
   return "未命名群";
+}
+
+function groupLabel(groupId, fallback) {
+  if (!groupId) return "全部群";
+  const remark = (state.settings.group_remarks || {})[groupId];
+  if (remark) return remark;
+  return watchedGroupName(groupId, fallback);
 }
 
 function present(card) {
@@ -62,7 +95,7 @@ function present(card) {
   const remarkName = userRemarks[card.senderUsername] || "";
   const remarkGroup = groupRemarks[card.conversationId] || "";
   const originalName = card.senderName || "群成员";
-  const originalGroup = groupLabel(card.conversationId, card.conversationName);
+  const originalGroup = watchedGroupName(card.conversationId, card.conversationName);
   return {
     ...card,
     displayName: remarkName || originalName,
@@ -85,11 +118,9 @@ function present(card) {
 
 function visibleMessages() {
   const needle = state.query.trim().toLowerCase();
-  const blocked = new Set(state.settings.blocked_groups || []);
+  const caOnly = Boolean(state.settings.ca_only);
   return state.messages.filter((card) => {
-    if (blocked.has(card.conversationId)) return false;
-    if (state.activeGroup && card.conversationId !== state.activeGroup) return false;
-    if (state.settings.ca_only && !(card.addresses || []).length) return false;
+    if (!window.WechatFeed.cardInFeed(card, state.settings, caOnly)) return false;
     if (!needle) return true;
     const shown = present(card);
     const blob = [shown.displayName, shown.displayGroup, card.text, card.quoteText, ...(card.addresses || [])]
@@ -110,29 +141,269 @@ function renderMode() {
   modeCa.classList.toggle("active", Boolean(state.settings.ca_only));
 }
 
-function renderGroups() {
-  const items = [{ id: "", name: "全部群" }, ...state.settings.groups];
-  groups.replaceChildren();
-  for (const item of items) {
-    if ((state.settings.blocked_groups || []).includes(item.id) && item.id) continue;
-    const button = document.createElement("button");
-    button.type = "button";
-    button.textContent = groupLabel(item.id, item.name);
-    button.title = item.id || "全部群";
-    if (item.id === state.activeGroup) button.className = "active";
-    button.addEventListener("click", () => {
-      state.activeGroup = item.id;
-      renderGroups();
-      loadFeed({ reset: true }).catch((error) => setNotice(error.message));
-    });
-    if (item.id) {
-      button.addEventListener("dblclick", (event) => {
-        event.preventDefault();
-        remarkGroup(item.id, groupLabel(item.id, item.name));
-      });
+function surfaceCaKey(surface) {
+  if (surface === "gmgn") return "gmgn_ca_only";
+  if (surface === "float") return "float_ca_only";
+  return "ca_only";
+}
+
+function renderSurfaceModes() {
+  for (const root of document.querySelectorAll(".surface-mode")) {
+    const key = surfaceCaKey(root.dataset.surface);
+    const caOnly = Boolean(state.settings[key]);
+    for (const button of root.querySelectorAll("[data-mode]")) {
+      button.classList.toggle("on", button.dataset.mode === (caOnly ? "ca" : "all"));
     }
-    groups.append(button);
   }
+}
+
+const expandedGroups = new Set();
+const memberCache = new Map();
+const memberQuery = new Map();
+
+async function ensureMembers(groupId) {
+  const cached = memberCache.get(groupId);
+  if (cached && Date.now() - cached.at < 15000) return cached.members;
+  const payload = await readJson(await fetch(`/api/groups/${encodeURIComponent(groupId)}/members`));
+  const members = payload.members || [];
+  memberCache.set(groupId, { at: Date.now(), members });
+  return members;
+}
+
+async function saveGroupUsers(groupId, users) {
+  const map = { ...(state.settings.group_users || {}) };
+  if (users === null) delete map[groupId];
+  else map[groupId] = users;
+  await saveSettings({ group_users: map }, { skipFeed: true });
+  renderGroups();
+  renderFeed();
+  state.feeds.all = emptyFeedCache();
+  state.feeds.ca = emptyFeedCache();
+  await loadFeed({ reset: true });
+  loadFeed({ reset: true, caOnly: !state.settings.ca_only }).catch(() => {});
+}
+
+function renderMemberPanel(panel, groupId, members) {
+  panel.replaceChildren();
+  const users = window.WechatFeed.groupListenUsers(state.settings, groupId);
+  const partial = users !== null;
+  const mode = document.createElement("div");
+  mode.className = "listen-mode";
+  const allBtn = document.createElement("button");
+  allBtn.type = "button";
+  allBtn.textContent = "监听全员";
+  allBtn.classList.toggle("on", !partial);
+  const partBtn = document.createElement("button");
+  partBtn.type = "button";
+  partBtn.textContent = "只听部分";
+  partBtn.classList.toggle("on", partial);
+  allBtn.addEventListener("click", () => {
+    saveGroupUsers(groupId, null).catch((error) => setNotice(error.message));
+  });
+  partBtn.addEventListener("click", () => {
+    saveGroupUsers(groupId, users || []).catch((error) => setNotice(error.message));
+  });
+  mode.append(allBtn, partBtn);
+  panel.append(mode);
+  if (partial && !users.length) {
+    const hint = document.createElement("p");
+    hint.className = "hint";
+    hint.textContent = "勾选要听的人。现在这个群不会显示任何人。";
+    panel.append(hint);
+  }
+  const filter = document.createElement("input");
+  filter.type = "search";
+  filter.className = "member-filter";
+  filter.placeholder = "筛选成员";
+  filter.value = memberQuery.get(groupId) || "";
+  const list = document.createElement("div");
+  list.className = "member-list";
+  const starred = new Set(state.settings.starred_users || []);
+  const muted = new Set(state.settings.blocked_users || []);
+  const listenSet = new Set(users || []);
+  const needle = filter.value.trim().toLowerCase();
+  const rank = (id) => (muted.has(id) ? 2 : starred.has(id) ? 0 : 1);
+  const sorted = members.slice().sort((a, b) => {
+    const diff = rank(a.id) - rank(b.id);
+    if (diff) return diff;
+    return String(a.name || a.id).localeCompare(String(b.name || b.id), "zh");
+  });
+  for (const member of sorted) {
+    const row = document.createElement("div");
+    row.className = "member-row";
+    row.dataset.id = member.id;
+    row.dataset.name = member.name || "";
+    const hit = String(member.name || "").toLowerCase().includes(needle) || member.id.toLowerCase().includes(needle);
+    row.hidden = Boolean(needle) && !hit;
+    if (partial) {
+      const check = document.createElement("input");
+      check.type = "checkbox";
+      check.checked = listenSet.has(member.id);
+      check.addEventListener("change", () => {
+        const next = new Set(users || []);
+        if (check.checked) next.add(member.id);
+        else next.delete(member.id);
+        saveGroupUsers(groupId, Array.from(next)).catch((error) => setNotice(error.message));
+      });
+      row.append(check);
+    }
+    const img = document.createElement("img");
+    img.src = `/api/avatar?username=${encodeURIComponent(member.id)}`;
+    img.alt = "";
+    img.addEventListener("error", () => img.remove());
+    const name = document.createElement("span");
+    name.className = "name";
+    name.textContent = member.name || member.id;
+    name.title = member.id;
+    const star = document.createElement("button");
+    star.type = "button";
+    star.className = `member-star${starred.has(member.id) ? " on" : ""}`;
+    star.textContent = starred.has(member.id) ? "★" : "☆";
+    star.title = starred.has(member.id) ? "改星标颜色或取消" : "星标这个人";
+    star.addEventListener("click", () => {
+      toggleStar(member.id, star).catch((error) => setNotice(error.message));
+    });
+    const mute = document.createElement("button");
+    mute.type = "button";
+    mute.className = `member-mute${muted.has(member.id) ? " on" : ""}`;
+    mute.textContent = muted.has(member.id) ? "已屏蔽" : "屏蔽";
+    mute.title = muted.has(member.id) ? "恢复这个人的发言" : "不看这个人的发言";
+    mute.addEventListener("click", () => {
+      toggleMuteUser(member.id).catch((error) => setNotice(error.message));
+    });
+    if (muted.has(member.id)) row.classList.add("is-blocked");
+    row.append(img, name, star, mute);
+    list.append(row);
+  }
+  if (!members.length) {
+    const empty = document.createElement("p");
+    empty.className = "hint";
+    empty.textContent = "这个群暂时读不到成员。";
+    list.append(empty);
+  }
+  filter.addEventListener("input", () => {
+    memberQuery.set(groupId, filter.value);
+    const text = filter.value.trim().toLowerCase();
+    for (const row of list.querySelectorAll(".member-row")) {
+      const name = (row.dataset.name || "").toLowerCase();
+      const id = (row.dataset.id || "").toLowerCase();
+      row.hidden = Boolean(text) && !name.includes(text) && !id.includes(text);
+    }
+  });
+  panel.append(filter, list);
+}
+
+function fillGroupList(box, storedKey) {
+  if (!box) return;
+  const top = box.scrollTop;
+  const monitored = window.WechatFeed.monitoredGroupIds(state.settings);
+  const stored = state.settings[storedKey] || [];
+  const selected = new Set(window.WechatFeed.selectedFeedGroups(stored, monitored));
+  const allOn = !stored.length;
+  box.replaceChildren();
+  const allLabel = document.createElement("label");
+  allLabel.className = "all";
+  const allBox = document.createElement("input");
+  allBox.type = "checkbox";
+  allBox.checked = allOn;
+  allLabel.append(allBox, document.createTextNode("全选监控群"));
+  allBox.addEventListener("change", () => {
+    if (!allBox.checked) {
+      allBox.checked = true;
+      return;
+    }
+    toggleFeedGroup(storedKey, "");
+  });
+  box.append(allLabel);
+  for (const item of state.settings.groups || []) {
+    if ((state.settings.blocked_groups || []).includes(item.id)) continue;
+    const wrap = document.createElement("div");
+    wrap.className = "group-item";
+    const row = document.createElement("div");
+    row.className = "group-row";
+    const label = document.createElement("label");
+    const check = document.createElement("input");
+    check.type = "checkbox";
+    check.checked = selected.has(item.id);
+    const name = groupLabel(item.id, item.name);
+    label.append(check, document.createTextNode(name));
+    label.title = `${item.id} · 双击改备注`;
+    check.addEventListener("change", () => toggleFeedGroup(storedKey, item.id));
+    label.addEventListener("dblclick", (event) => {
+      event.preventDefault();
+      remarkGroup(item.id, name);
+    });
+    const listen = window.WechatFeed.groupListenUsers(state.settings, item.id);
+    const membersBtn = document.createElement("button");
+    membersBtn.type = "button";
+    membersBtn.className = "group-members";
+    membersBtn.textContent = listen === null ? "成员" : `${listen.length}人`;
+    membersBtn.title = listen === null ? "查看成员、星标、屏蔽、只听部分人" : "正在只听部分用户";
+    membersBtn.addEventListener("click", () => {
+      if (expandedGroups.has(item.id)) expandedGroups.delete(item.id);
+      else expandedGroups.add(item.id);
+      renderGroups();
+    });
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "group-remove";
+    remove.textContent = "移除";
+    remove.title = "停止监控这个群";
+    remove.addEventListener("click", () => {
+      removeGroup(item.id).catch((error) => setNotice(error.message));
+    });
+    row.append(label, membersBtn, remove);
+    wrap.append(row);
+    if (expandedGroups.has(item.id)) {
+      const panel = document.createElement("div");
+      panel.className = "member-panel";
+      const cached = memberCache.get(item.id);
+      if (cached && Date.now() - cached.at < 15000) {
+        renderMemberPanel(panel, item.id, cached.members);
+      } else {
+        panel.textContent = "正在读取成员…";
+        ensureMembers(item.id)
+          .then(() => renderGroups())
+          .catch((error) => {
+            panel.textContent = error.message;
+          });
+      }
+      wrap.append(panel);
+    }
+    box.append(wrap);
+  }
+  box.scrollTop = top;
+}
+
+function renderGroups() {
+  fillGroupList(document.querySelector("#groups-all"), "all_feed_groups");
+  fillGroupList(document.querySelector("#groups-ca"), "ca_feed_groups");
+}
+
+async function toggleFeedGroup(storedKey, groupId) {
+  const monitored = window.WechatFeed.monitoredGroupIds(state.settings);
+  const next = window.WechatFeed.nextFeedGroups(state.settings[storedKey] || [], groupId, monitored);
+  try {
+    await saveSettings({ [storedKey]: next }, { skipFeed: true });
+    renderGroups();
+    renderFeed();
+  } catch (error) {
+    setNotice(error.message);
+  }
+}
+
+function userLabel(userId) {
+  const remark = (state.settings.user_remarks || {})[userId];
+  if (remark) return remark;
+  for (const card of state.messages) {
+    if (card.senderUsername === userId) return card.senderName || userId;
+  }
+  for (const cached of memberCache.values()) {
+    for (const member of cached.members || []) {
+      if (member.id === userId) return member.name || userId;
+    }
+  }
+  return userId;
 }
 
 function renderBlocked() {
@@ -140,8 +411,15 @@ function renderBlocked() {
   for (const groupId of state.settings.blocked_groups || []) {
     const button = document.createElement("button");
     button.type = "button";
-    button.textContent = `恢复 ${groupLabel(groupId, groupId)}`;
+    button.textContent = `恢复群 ${groupLabel(groupId, groupId)}`;
     button.addEventListener("click", () => unmuteGroup(groupId));
+    blockedBox.append(button);
+  }
+  for (const userId of state.settings.blocked_users || []) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = `恢复 ${userLabel(userId)}`;
+    button.addEventListener("click", () => unmuteUser(userId));
     blockedBox.append(button);
   }
 }
@@ -159,9 +437,22 @@ function renderFeed() {
     more.hidden = true;
     return;
   }
-  feed.innerHTML = cards.map((card) => WechatFeed.cardHtml(present(card))).join("");
+  feed.innerHTML = cards.map((card, index) => WechatFeed.cardHtml(present(card), WechatFeed.stackMeta(cards, index))).join("");
   more.hidden = !state.hasMore;
   more.textContent = state.loadingMore ? "正在加载…" : "加载更早的消息…";
+  for (const img of feed.querySelectorAll(".wf-token-logo[src], .wf-token-hero[src]")) {
+    img.addEventListener("error", () => {
+      if (img.classList.contains("wf-token-logo")) {
+        const letter = document.createElement("span");
+        letter.className = "wf-token-logo wf-token-fallback";
+        const sym = img.closest(".wf-token")?.querySelector(".wf-token-title strong")?.textContent || "?";
+        letter.textContent = String(sym).replace("$", "").slice(0, 1) || "?";
+        img.replaceWith(letter);
+        return;
+      }
+      img.remove();
+    });
+  }
 }
 
 function renderDirectory() {
@@ -170,23 +461,36 @@ function renderDirectory() {
     if (!needle) return true;
     return `${group.name || ""} ${group.id}`.toLowerCase().includes(needle);
   });
+  const watched = new Set((state.settings.groups || []).map((item) => item.id));
   directorySearch.hidden = !state.directory.length;
   directory.replaceChildren();
-  for (const group of rows.slice(0, 12)) {
-    const button = document.createElement("button");
-    button.type = "button";
+  for (const group of rows) {
+    const label = document.createElement("label");
+    if (watched.has(group.id)) label.className = "on";
+    const check = document.createElement("input");
+    check.type = "checkbox";
+    check.checked = watched.has(group.id);
     const name = document.createElement("strong");
-    name.textContent = group.name || "未命名群";
+    name.textContent = groupLabel(group.id, group.name || "未命名群");
     const id = document.createElement("span");
     id.textContent = group.id;
-    button.append(name, id);
-    button.addEventListener("click", () => addGroup(group.id, group.name));
-    directory.append(button);
+    label.title = group.name && group.name !== name.textContent ? group.name : group.id;
+    label.append(check, name, id);
+    check.addEventListener("change", () => {
+      const action = check.checked
+        ? addGroup(group.id, group.name)
+        : removeGroup(group.id);
+      action.catch((error) => {
+        check.checked = !check.checked;
+        setNotice(error.message);
+      });
+    });
+    directory.append(label);
   }
-  if (rows.length > 12) {
+  if (!rows.length && state.directory.length) {
     const hint = document.createElement("p");
     hint.className = "notice";
-    hint.textContent = `还有 ${rows.length - 12} 个群，输入关键字继续筛选。`;
+    hint.textContent = "没有匹配的群，换个关键字再筛。";
     directory.append(hint);
   }
 }
@@ -195,6 +499,7 @@ function mergeSettings(next) {
   const incoming = { ...(next || {}) };
   delete incoming.gmgn_api_key;
   state.settings = { ...state.settings, ...incoming };
+  if (window.WechatFeed) window.WechatFeed.setNumberFormat(state.settings.mcap_format);
 }
 
 function renderKey() {
@@ -216,6 +521,7 @@ function render() {
   renderKey();
   renderRuntime();
   renderMode();
+  renderSurfaceModes();
   renderGroups();
   renderBlocked();
   renderDirectory();
@@ -230,7 +536,7 @@ async function readJson(response) {
   return payload;
 }
 
-async function saveSettings(patch) {
+async function saveSettings(patch, { skipFeed = false } = {}) {
   const settings = await readJson(
     await fetch("/api/settings", {
       method: "PUT",
@@ -239,44 +545,72 @@ async function saveSettings(patch) {
     }),
   );
   mergeSettings(settings);
-  render();
+  if (skipFeed) {
+    gmgn.checked = Boolean(state.settings.gmgn_overlay);
+    floatPanel.checked = Boolean(state.settings.float_panel);
+    renderKey();
+    renderRuntime();
+    renderMode();
+    renderSurfaceModes();
+    renderGroups();
+    renderBlocked();
+  } else {
+    render();
+  }
   return state.settings;
 }
 
-async function loadFeed({ reset = false } = {}) {
-  if (state.loadingMore) return;
-  if (!reset && !state.hasMore) return;
-  state.loadingMore = true;
-  renderFeed();
+async function loadFeed({ reset = false, caOnly = Boolean(state.settings.ca_only) } = {}) {
+  const key = feedKey(caOnly);
+  const cache = state.feeds[key];
+  if (cache.loading) {
+    while (cache.loading) {
+      await new Promise((resolve) => setTimeout(resolve, 40));
+    }
+    if (key === feedKey()) {
+      syncViewFromCache();
+      renderFeed();
+    }
+    return;
+  }
+  if (!reset && cache.loaded && !cache.hasMore) return;
+  cache.loading = true;
+  if (key === feedKey()) {
+    state.loadingMore = true;
+    renderFeed();
+  }
   try {
     const params = new URLSearchParams({ limit: String(PAGE_SIZE) });
-    if (state.settings.ca_only) params.set("ca_only", "true");
-    if (state.activeGroup) params.set("conversation_id", state.activeGroup);
-    if (!reset && state.oldest) {
-      params.set("before", String(state.oldest));
-      if (state.oldestReceived) params.set("before_received", String(state.oldestReceived));
+    if (caOnly) params.set("ca_only", "true");
+    if (!reset && cache.oldest) {
+      params.set("before", String(cache.oldest));
+      if (cache.oldestReceived) params.set("before_received", String(cache.oldestReceived));
     }
     const payload = await readJson(await fetch(`/api/messages?${params}`));
     const incoming = payload.messages || [];
     if (reset) {
-      state.messages = incoming;
+      cache.messages = incoming;
     } else {
-      const seen = new Set(state.messages.map((item) => item.id));
-      state.messages = state.messages.concat(incoming.filter((item) => !seen.has(item.id)));
+      const seen = new Set(cache.messages.map((item) => item.id));
+      cache.messages = cache.messages.concat(incoming.filter((item) => !seen.has(item.id)));
     }
-    state.hasMore = Boolean(payload.has_more);
+    cache.hasMore = Boolean(payload.has_more);
+    cache.loaded = true;
     if (incoming.length) {
       const last = incoming[incoming.length - 1];
-      state.oldest = Number(last.createTime) || 0;
-      state.oldestReceived = Number(last.receivedAt) || 0;
+      cache.oldest = Number(last.createTime) || 0;
+      cache.oldestReceived = Number(last.receivedAt) || 0;
     }
     if (reset && !incoming.length) {
-      state.oldest = 0;
-      state.oldestReceived = 0;
+      cache.oldest = 0;
+      cache.oldestReceived = 0;
     }
   } finally {
-    state.loadingMore = false;
-    renderFeed();
+    cache.loading = false;
+    if (key === feedKey()) {
+      syncViewFromCache();
+      renderFeed();
+    }
   }
 }
 
@@ -288,6 +622,29 @@ async function addGroup(id, name) {
   setNotice(`已监控 ${name || id}`);
 }
 
+async function removeGroup(id) {
+  if (!id) return;
+  const next = (state.settings.groups || []).filter((item) => item.id !== id);
+  const allFeed = (state.settings.all_feed_groups || []).filter((item) => item !== id);
+  const caFeed = (state.settings.ca_feed_groups || []).filter((item) => item !== id);
+  const users = { ...(state.settings.group_users || {}) };
+  delete users[id];
+  await saveSettings({
+    groups: next,
+    all_feed_groups: allFeed,
+    ca_feed_groups: caFeed,
+    group_users: users,
+  });
+  setNotice(`已停止监控 ${groupLabel(id, id)}`);
+}
+
+async function reloadFeeds() {
+  state.feeds.all = emptyFeedCache();
+  state.feeds.ca = emptyFeedCache();
+  await loadFeed({ reset: true });
+  loadFeed({ reset: true, caOnly: !state.settings.ca_only }).catch(() => {});
+}
+
 async function muteGroup(groupId) {
   if (!groupId) return;
   const blocked = Array.from(new Set([...(state.settings.blocked_groups || []), groupId]));
@@ -297,7 +654,35 @@ async function muteGroup(groupId) {
 
 async function unmuteGroup(groupId) {
   const blocked = (state.settings.blocked_groups || []).filter((item) => item !== groupId);
-  await saveSettings({ blocked_groups: blocked });
+  await saveSettings({ blocked_groups: blocked }, { skipFeed: true });
+  renderBlocked();
+  renderGroups();
+  await reloadFeeds();
+}
+
+async function muteUser(userId) {
+  if (!userId) return;
+  const blocked = Array.from(new Set([...(state.settings.blocked_users || []), userId]));
+  await saveSettings({ blocked_users: blocked });
+  setNotice("已屏蔽这个人的发言。点上方红色按钮可恢复。");
+}
+
+async function unmuteUser(userId) {
+  const blocked = (state.settings.blocked_users || []).filter((item) => item !== userId);
+  await saveSettings({ blocked_users: blocked }, { skipFeed: true });
+  renderBlocked();
+  renderGroups();
+  renderFeed();
+  await reloadFeeds();
+}
+
+async function toggleMuteUser(userId) {
+  if (!userId) return;
+  if ((state.settings.blocked_users || []).includes(userId)) {
+    await unmuteUser(userId);
+    return;
+  }
+  await muteUser(userId);
 }
 
 function pickStarColor(anchor, current) {
@@ -391,15 +776,31 @@ async function remarkGroup(groupId, current) {
   const remarks = { ...(state.settings.group_remarks || {}) };
   if (next.trim()) remarks[groupId] = next.trim();
   else delete remarks[groupId];
-  const nextGroups = (state.settings.groups || []).map((item) =>
-    item.id === groupId ? { ...item, name: next.trim() } : item,
-  );
-  await saveSettings({ group_remarks: remarks, groups: nextGroups });
+  await saveSettings({ group_remarks: remarks });
 }
 
 async function setCaOnly(enabled) {
-  await saveSettings({ ca_only: Boolean(enabled) });
-  await loadFeed({ reset: true });
+  state.settings.ca_only = Boolean(enabled);
+  syncViewFromCache();
+  renderMode();
+  renderFeed();
+  try {
+    await saveSettings({ ca_only: Boolean(enabled) }, { skipFeed: true });
+    const cache = activeCache();
+    if (!cache.loaded) await loadFeed({ reset: true, caOnly: Boolean(enabled) });
+  } catch (error) {
+    setNotice(error.message);
+  }
+}
+
+async function setSurfaceCaOnly(surface, enabled) {
+  const key = surfaceCaKey(surface);
+  try {
+    await saveSettings({ [key]: Boolean(enabled) }, { skipFeed: true });
+    renderSurfaceModes();
+  } catch (error) {
+    setNotice(error.message);
+  }
 }
 
 async function load() {
@@ -410,7 +811,8 @@ async function load() {
   mergeSettings(settings);
   state.runtime = health.runtime || state.runtime;
   render();
-  await loadFeed({ reset: true });
+  await loadFeed({ reset: true, caOnly: Boolean(state.settings.ca_only) });
+  loadFeed({ reset: true, caOnly: !state.settings.ca_only }).catch(() => {});
 }
 
 query.addEventListener("input", () => {
@@ -425,6 +827,14 @@ directoryQuery.addEventListener("input", () => {
 
 modeAll.addEventListener("click", () => setCaOnly(false));
 modeCa.addEventListener("click", () => setCaOnly(true));
+
+for (const root of document.querySelectorAll(".surface-mode")) {
+  root.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-mode]");
+    if (!button) return;
+    setSurfaceCaOnly(root.dataset.surface, button.dataset.mode === "ca");
+  });
+}
 
 gmgn.addEventListener("change", async () => {
   try {
@@ -475,7 +885,11 @@ document.querySelector("#load-groups").addEventListener("click", async () => {
       await saveSettings({ groups: nextGroups });
     }
     renderDirectory();
-    setNotice(state.directory.length ? "输入关键字筛选群，点击即可加入监控。" : "没有读到群会话。");
+    setNotice(
+      state.directory.length
+        ? "输入关键字筛选群。勾选加入监控，取消勾选即从监控里移除。"
+        : "没有读到群会话。",
+    );
   } catch (error) {
     setNotice(error.message);
   }
@@ -514,28 +928,50 @@ document.querySelector("#save-key").addEventListener("click", async () => {
 
 let imagePreview = null;
 
+function sizeToBox(el, maxW, maxH) {
+  const nw = el.naturalWidth;
+  const nh = el.naturalHeight;
+  if (!nw || !nh) return false;
+  const scale = Math.min(maxW / nw, maxH / nh);
+  el.style.width = `${Math.round(nw * scale)}px`;
+  el.style.height = `${Math.round(nh * scale)}px`;
+  return true;
+}
+
+function placePreview(el, img) {
+  const rect = img.getBoundingClientRect();
+  const previewWidth = el.offsetWidth || Math.min(480, window.innerWidth - 24);
+  const previewHeight = el.offsetHeight || 80;
+  let left = rect.right + 12;
+  if (left + previewWidth > window.innerWidth - 8) left = Math.max(8, rect.left - previewWidth - 12);
+  const top = Math.max(8, Math.min(rect.top, window.innerHeight - previewHeight - 8));
+  el.style.left = `${left}px`;
+  el.style.top = `${top}px`;
+}
+
 function showImagePreview(img) {
   const src = img.currentSrc || img.getAttribute("src") || "";
   if (!src) return;
   if (!imagePreview) {
     imagePreview = document.createElement("img");
     imagePreview.alt = "预览";
-    imagePreview.style.cssText = "position:fixed;z-index:40;max-width:min(480px, calc(100vw - 24px));max-height:min(560px, calc(100vh - 24px));border-radius:12px;box-shadow:0 18px 50px rgba(0,0,0,.38);pointer-events:none;background:#111;object-fit:contain;";
+    imagePreview.style.cssText = "position:fixed;z-index:40;border-radius:12px;box-shadow:0 18px 50px rgba(0,0,0,.38);pointer-events:none;background:#111;object-fit:contain;";
     document.body.append(imagePreview);
   }
   const full = img.dataset.wfFull;
+  const maxW = Math.min(480, window.innerWidth - 24);
+  const maxH = Math.min(560, window.innerHeight - 24);
+  const layout = () => {
+    sizeToBox(imagePreview, maxW, maxH);
+    placePreview(imagePreview, img);
+  };
+  imagePreview.onload = layout;
   imagePreview.onerror = full ? () => {
     imagePreview.onerror = null;
     imagePreview.src = src;
   } : null;
   imagePreview.src = full || src;
-  const rect = img.getBoundingClientRect();
-  const previewWidth = Math.min(480, window.innerWidth - 24);
-  let left = rect.right + 12;
-  if (left + previewWidth > window.innerWidth - 8) left = Math.max(8, rect.left - previewWidth - 12);
-  const top = Math.max(8, Math.min(rect.top, window.innerHeight - 80));
-  imagePreview.style.left = `${left}px`;
-  imagePreview.style.top = `${top}px`;
+  if (imagePreview.complete) layout();
   imagePreview.hidden = false;
 }
 
@@ -543,19 +979,54 @@ function hideImagePreview() {
   if (imagePreview) imagePreview.hidden = true;
 }
 
+function showImageLightbox(img) {
+  hideImagePreview();
+  const src = img.currentSrc || img.getAttribute("src") || "";
+  if (!src) return;
+  const full = img.dataset.wfFull;
+  const overlay = document.createElement("div");
+  overlay.style.cssText = "position:fixed;inset:0;z-index:80;background:rgba(0,0,0,.78);display:flex;align-items:center;justify-content:center;cursor:zoom-out;";
+  const picture = document.createElement("img");
+  picture.alt = "";
+  picture.style.cssText = "border-radius:12px;box-shadow:0 18px 50px rgba(0,0,0,.45);background:#111;object-fit:contain;";
+  const maxW = window.innerWidth * 0.92;
+  const maxH = window.innerHeight * 0.92;
+  picture.onload = () => sizeToBox(picture, maxW, maxH);
+  picture.onerror = full ? () => {
+    picture.onerror = null;
+    picture.src = src;
+  } : null;
+  picture.src = full || src;
+  overlay.append(picture);
+  overlay.addEventListener("click", () => overlay.remove());
+  document.body.append(overlay);
+}
+
 feed.addEventListener("mouseover", (event) => {
-  const img = event.target.closest(".wf-media");
+  const img = event.target.closest(".wf-media, .wf-emoji");
   if (img) showImagePreview(img);
 });
 
 feed.addEventListener("mouseout", (event) => {
-  const img = event.target.closest(".wf-media");
+  const img = event.target.closest(".wf-media, .wf-emoji");
   if (!img) return;
   if (event.relatedTarget && img.contains(event.relatedTarget)) return;
   hideImagePreview();
 });
 
 feed.addEventListener("click", (event) => {
+  if (event.target.closest("a.wf-text-link, a.wf-token-link")) return;
+  const fmtBtn = event.target.closest("[data-mcap-format]");
+  if (fmtBtn) {
+    const next = fmtBtn.dataset.mcapFormat === "en" ? "en" : "cn";
+    saveSettings({ mcap_format: next }).catch((error) => setNotice(error.message));
+    return;
+  }
+  const media = event.target.closest(".wf-media, .wf-emoji");
+  if (media) {
+    showImageLightbox(media);
+    return;
+  }
   const copy = event.target.closest("[data-copy]");
   if (copy) {
     navigator.clipboard.writeText(copy.dataset.copy || "");
@@ -566,6 +1037,12 @@ feed.addEventListener("click", (event) => {
   if (star) {
     const card = star.closest(".wf-card");
     toggleStar(card && card.dataset.user, star);
+    return;
+  }
+  const muteUserBtn = event.target.closest("[data-mute-user]");
+  if (muteUserBtn) {
+    const card = muteUserBtn.closest(".wf-card");
+    muteUser(card && card.dataset.user).catch((error) => setNotice(error.message));
     return;
   }
   const mute = event.target.closest("[data-mute]");
@@ -603,21 +1080,30 @@ source.onmessage = (event) => {
     return;
   }
   if (payload.type === "cleared") {
-    state.messages = [];
-    state.hasMore = false;
+    state.feeds.all = emptyFeedCache();
+    state.feeds.ca = emptyFeedCache();
+    syncViewFromCache();
     renderFeed();
     return;
   }
   if (payload.type === "patch" && payload.card) {
-    state.messages = state.messages.map((item) => (item.id === payload.card.id ? payload.card : item));
+    const apply = (list) => list.map((item) => (item.id === payload.card.id ? payload.card : item));
+    state.feeds.all.messages = apply(state.feeds.all.messages);
+    state.feeds.ca.messages = apply(state.feeds.ca.messages);
+    syncViewFromCache();
     renderFeed();
     return;
   }
   if (payload.type === "message" && payload.card) {
-    if (!state.messages.some((item) => item.id === payload.card.id)) {
-      state.messages.unshift(payload.card);
-      renderFeed();
-    }
+    const remember = (cache, card) => {
+      if (!cache.messages.some((item) => item.id === card.id)) {
+        cache.messages.unshift(card);
+      }
+    };
+    remember(state.feeds.all, payload.card);
+    if ((payload.card.addresses || []).length) remember(state.feeds.ca, payload.card);
+    syncViewFromCache();
+    renderFeed();
   }
 };
 

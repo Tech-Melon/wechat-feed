@@ -117,7 +117,7 @@ def menu() -> None:
         settings = store.get()
         overlay = "开" if settings["gmgn_overlay"] else "关"
         print()
-        print("微信群信息流")
+        print("技术瓜群流")
         print("1. 启动本地页面和监控")
         print("2. 查看当前配置")
         print("3. 设置上游地址")

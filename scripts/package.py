@@ -68,6 +68,24 @@ def main() -> int:
     if leaks:
         print("包里混进了本机数据：", leaks)
         return 1
+    data_leaks = [path for path in picked if "data" in path.relative_to(ROOT).parts]
+    if data_leaks:
+        print("包里混进了 data/：", data_leaks)
+        return 1
+    local_key = ""
+    settings_path = ROOT / "data" / "settings.json"
+    if settings_path.is_file():
+        try:
+            local_key = str(
+                json.loads(settings_path.read_text(encoding="utf-8")).get("gmgn_api_key") or ""
+            ).strip()
+        except (OSError, json.JSONDecodeError, TypeError):
+            local_key = ""
+    if local_key:
+        key_hits = [path for path in picked if local_key.encode("utf-8") in path.read_bytes()]
+        if key_hits:
+            print("包里出现了本机 GMGN Key：", key_hits)
+            return 1
     dist = ROOT / "dist"
     dist.mkdir(exist_ok=True)
     target = dist / f"wechat-feed-{version}.zip"

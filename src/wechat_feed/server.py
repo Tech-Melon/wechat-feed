@@ -11,20 +11,29 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
-from .config import SettingsStore, data_dir, project_root
+from . import http as feed_http
+from .config import SettingsStore, data_dir, group_senders_by_id, project_root, validate_group_id
 from .direct import DirectSource
 from .hub import Hub
 from .normalize import normalize_message_event
 from .store import CardStore
-from .tokens import TokenIndex
+from .tokens import TokenIndex, chain_favicon
 from .upstream import apply_display, backfill_history, fetch_upstream_groups, supervise
+from .wxemoji import (
+    allowed_sticker_url,
+    decode_query_url,
+    emote_source,
+    pick_mime,
+    sticker_cache,
+    valid_md5,
+    within_limit,
+)
 from .wximage import load_image, parse_ref, ref_for
 
 _AVATAR_USER = re.compile(r"^[A-Za-z0-9_@.\-]{1,80}$")
@@ -96,8 +105,9 @@ def create_app() -> FastAPI:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        await feed_http.aclose()
 
-    app = FastAPI(title="微信群信息流", lifespan=lifespan)
+    app = FastAPI(title="技术瓜群流", lifespan=lifespan)
     # 网页不能跨源读群消息；只放行浏览器扩展，本地页是同源。
     app.add_middleware(
         CORSMiddleware,
@@ -109,16 +119,29 @@ def create_app() -> FastAPI:
     app.state.hub = hub
     app.state.persist = persist
 
+    def _token_needs_gmgn(card: dict[str, Any]) -> bool:
+        if not card.get("cas"):
+            return False
+        tokens = card.get("tokenCards") or []
+        if not tokens:
+            return True
+        return any(str(item.get("source") or "") == "dexscreener" for item in tokens)
+
     async def enrich_missing(card: dict[str, Any]) -> None:
-        if not card.get("cas") or card.get("tokenCards"):
+        if not _token_needs_gmgn(card):
             return
+        card_id = str(card["id"])
+
+        def push(tokens: list[dict[str, Any]]) -> None:
+            if tokens:
+                hub.patch(card_id, {"tokenCards": tokens})
+
         try:
-            tokens = await token_index.resolve_many(list(card["cas"]))
+            tokens = await token_index.resolve_many(list(card["cas"]), on_partial=push)
         except Exception as exc:
             logger.info("代币信息补全失败: {}", type(exc).__name__)
             return
-        if tokens:
-            hub.patch(str(card["id"]), {"tokenCards": tokens})
+        push(tokens)
 
     @app.get("/api/health")
     def health() -> dict[str, Any]:
@@ -162,13 +185,17 @@ def create_app() -> FastAPI:
     ) -> dict[str, Any]:
         settings = store.get()
         blocked = list(settings.get("blocked_groups") or [])
+        blocked_senders = [str(item) for item in (settings.get("blocked_users") or []) if item]
+        senders = group_senders_by_id(settings)
         cards, has_more = persist.page(
             limit=limit,
             before=before,
             before_received=before_received,
             conversation_id=conversation_id or None,
             blocked=blocked,
-            ca_only=ca_only or bool(settings.get("ca_only")),
+            ca_only=ca_only,
+            senders_by_group=senders or None,
+            blocked_senders=blocked_senders or None,
         )
         shown = [apply_display(dict(card), settings) for card in cards]
         for card in shown:
@@ -177,7 +204,7 @@ def create_app() -> FastAPI:
         for card in shown:
             if pending >= 12:
                 break
-            if card.get("cas") and not card.get("tokenCards"):
+            if _token_needs_gmgn(card):
                 asyncio.create_task(enrich_missing(card))
                 pending += 1
         return {
@@ -226,10 +253,9 @@ def create_app() -> FastAPI:
                 )
         url = f"{settings['upstream_base']}/api/chat/avatar"
         try:
-            async with httpx.AsyncClient(
-                timeout=8.0, trust_env=False, follow_redirects=True
-            ) as client:
-                response = await client.get(url, params={"username": ident, "source": "auto"})
+            response = await feed_http.client().get(
+                url, params={"username": ident, "source": "auto"}, timeout=8.0
+            )
         except Exception as exc:
             logger.info("头像读取失败: {}", type(exc).__name__)
             raise HTTPException(status_code=502, detail="头像读不到") from exc
@@ -262,9 +288,10 @@ def create_app() -> FastAPI:
         found = await asyncio.to_thread(load_image, reader.wx_dir, ref, aes_key, xor_key)
         if found is None:
             return None
+        blob, media_type, _kind = found
         return Response(
-            content=found[0],
-            media_type=found[1],
+            content=blob,
+            media_type=media_type,
             headers={"Cache-Control": "private, max-age=604800, immutable"},
         )
 
@@ -280,10 +307,7 @@ def create_app() -> FastAPI:
         if parsed.port != 10392:
             raise HTTPException(status_code=400, detail="媒体端口不正确")
         try:
-            async with httpx.AsyncClient(
-                timeout=10.0, trust_env=False, follow_redirects=True
-            ) as client:
-                response = await client.get(raw)
+            response = await feed_http.client().get(raw, timeout=10.0)
         except Exception as exc:
             fallback = await local_media(parsed.query)
             if fallback is not None:
@@ -316,11 +340,85 @@ def create_app() -> FastAPI:
                 detail="图片还没下载或解不开",
                 headers={"Cache-Control": "no-store"},
             )
-        blob, media_type = found
+        blob, media_type, kind = found
+        # 高清位要的是 _h / 原图。若微信还没下，这里只能拿出缩略图，不能当高清缓存一周。
+        cache = (
+            "no-store"
+            if hd and kind == "t"
+            else "private, max-age=604800, immutable"
+        )
         return Response(
             content=blob,
             media_type=media_type,
-            headers={"Cache-Control": "private, max-age=604800, immutable"},
+            headers={"Cache-Control": cache, "X-Wx-Image": kind},
+        )
+
+    async def _cached_image(
+        url: str,
+        cache: Path,
+        ceiling: int,
+        *,
+        cache_header: str = "private, max-age=604800, immutable",
+    ) -> Response:
+        if cache.is_file():
+            blob = cache.read_bytes()
+            mime = pick_mime(blob)
+            if mime:
+                return Response(
+                    content=blob,
+                    media_type=mime,
+                    headers={"Cache-Control": cache_header},
+                )
+        try:
+            remote = await feed_http.client().get(
+                url,
+                timeout=8.0,
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+        except Exception as exc:
+            logger.info("远程图片下载失败: {}", type(exc).__name__)
+            raise HTTPException(status_code=502, detail="图片读不到") from exc
+        if remote.status_code != 200 or not within_limit(remote.content, ceiling):
+            raise HTTPException(status_code=404, detail="图片读不到")
+        mime = pick_mime(remote.content)
+        if not mime:
+            raise HTTPException(status_code=404, detail="不是图片")
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_bytes(remote.content)
+        return Response(
+            content=remote.content,
+            media_type=mime,
+            headers={"Cache-Control": cache_header},
+        )
+
+    @app.get("/api/wxemoji")
+    async def wx_sticker(md5: str, u: str = "") -> Response:
+        if not valid_md5(md5):
+            raise HTTPException(status_code=400, detail="表情引用不合法")
+        url = decode_query_url(u)
+        if not allowed_sticker_url(url):
+            raise HTTPException(status_code=400, detail="表情地址不合法")
+        return await _cached_image(url, sticker_cache(data_dir() / "stickers", md5), 1_500_000)
+
+    @app.get("/api/wxemote")
+    async def wx_emote(n: str = "") -> Response:
+        source = emote_source(n)
+        if source is None:
+            raise HTTPException(status_code=404, detail="没有这个表情")
+        url, filename = source
+        return await _cached_image(url, data_dir() / "emotes" / filename, 80_000)
+
+    @app.get("/api/chainicon")
+    async def chain_icon(n: str = "") -> Response:
+        source = chain_favicon(n)
+        if source is None:
+            raise HTTPException(status_code=404, detail="没有这个链图标")
+        url, filename = source
+        return await _cached_image(
+            url,
+            data_dir() / "chainicons" / filename,
+            80_000,
+            cache_header="private, max-age=31536000, immutable",
         )
 
     @app.delete("/api/messages")
@@ -332,19 +430,52 @@ def create_app() -> FastAPI:
     @app.get("/api/groups")
     async def get_groups() -> dict[str, Any]:
         settings = store.get()
+        started = time.perf_counter()
         try:
             reader = await direct.reader(str(settings["upstream_base"]))
             if reader is not None:
                 groups = await asyncio.to_thread(reader.groups)
+                source = "direct"
             else:
                 groups = await fetch_upstream_groups(str(settings["upstream_base"]))
+                source = "wda"
         except Exception as exc:
             logger.info("读取群列表失败: {}", type(exc).__name__)
             raise HTTPException(
                 status_code=502,
                 detail="读不到本机微信会话。请确认 WeChatDataAnalysis 已启动并完成解密。",
             ) from exc
+        logger.info(
+            "读取群列表 {} 个（{}）{:.0f}ms",
+            len(groups),
+            source,
+            (time.perf_counter() - started) * 1000,
+        )
         return {"groups": groups}
+
+    @app.get("/api/groups/{group_id}/members")
+    async def get_members(group_id: str) -> dict[str, Any]:
+        try:
+            room = validate_group_id(group_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        settings = store.get()
+        started = time.perf_counter()
+        reader = await direct.reader(str(settings["upstream_base"]))
+        if reader is None:
+            raise HTTPException(status_code=503, detail="直读模式没有打开，暂时读不到群成员")
+        try:
+            members = await asyncio.to_thread(reader.members, room)
+        except Exception as exc:
+            logger.info("读取群成员失败: {}", type(exc).__name__)
+            raise HTTPException(status_code=502, detail="读不到这个群的成员") from exc
+        logger.info(
+            "读取群成员 {} 个（{}）{:.0f}ms",
+            len(members),
+            room,
+            (time.perf_counter() - started) * 1000,
+        )
+        return {"groupId": room, "members": members}
 
     @app.post("/api/demo")
     async def post_demo() -> dict[str, Any]:

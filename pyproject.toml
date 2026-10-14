@@ -1,7 +1,7 @@
 [project]
 name = "wechat-feed"
-version = "0.7.1"
-description = "本机微信群消息信息流"
+version = "0.8.9"
+description = "技术瓜群流：本机微信群消息信息流"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

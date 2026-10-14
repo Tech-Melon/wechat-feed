@@ -13,6 +13,7 @@ from loguru import logger
 
 from .config import SettingsStore
 from .direct import DirectSource, direct_backfill, direct_disabled, direct_stream
+from .http import client as http_client
 from .hub import Hub
 from .normalize import extract_groups, normalize_message_event
 from .store import KEEP_SECONDS
@@ -70,8 +71,6 @@ def _describe_failure(exc: BaseException) -> str:
 
 
 def _allowed(settings: dict[str, Any], conversation_id: str) -> bool:
-    if conversation_id in {str(item) for item in settings.get("blocked_groups") or []}:
-        return False
     groups = list(settings.get("groups") or [])
     if not groups:
         return conversation_id.endswith("@chatroom")
@@ -116,10 +115,11 @@ def apply_display(card: dict[str, Any], settings: dict[str, Any]) -> dict[str, A
 
 async def fetch_upstream_groups(upstream_base: str) -> list[dict[str, str]]:
     url = f"{upstream_base.rstrip('/')}/api/chat/sessions"
-    async with httpx.AsyncClient(timeout=_SESSION_TIMEOUT, trust_env=False) as client:
-        response = await client.get(url, params={"source": "realtime"})
-        response.raise_for_status()
-        return extract_groups(response.json())
+    response = await http_client().get(
+        url, params={"source": "realtime"}, timeout=_SESSION_TIMEOUT
+    )
+    response.raise_for_status()
+    return extract_groups(response.json())
 
 
 async def _enrich_card(
@@ -128,13 +128,16 @@ async def _enrich_card(
     card_id: str,
     cas: list[dict[str, Any]],
 ) -> None:
+    def push(tokens: list[dict[str, Any]]) -> None:
+        if tokens:
+            hub.patch(card_id, {"tokenCards": tokens})
+
     try:
-        tokens = await index.resolve_many(cas)
+        tokens = await index.resolve_many(cas, on_partial=push)
     except Exception as exc:
         logger.info("代币信息补全失败: {}", type(exc).__name__)
         return
-    if tokens:
-        hub.patch(card_id, {"tokenCards": tokens})
+    push(tokens)
 
 
 def _ingest_card(
@@ -183,8 +186,7 @@ async def _pull_watched_groups(
     hub: Hub,
     token_index: TokenIndex,
 ) -> None:
-    blocked = {str(item) for item in settings.get("blocked_groups") or []}
-    groups = [item for item in settings.get("groups") or [] if item["id"] not in blocked]
+    groups = list(settings.get("groups") or [])
     if not groups:
         return
     base = str(settings["upstream_base"]).rstrip("/")
@@ -264,36 +266,37 @@ async def fetch_group_history(
     collected: list[dict[str, Any]] = []
     offset = 0
     timeout = httpx.Timeout(20.0, connect=5.0)
-    async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
-        while len(collected) < limit_total:
-            response = await client.get(
-                f"{upstream_base.rstrip('/')}/api/chat/messages",
-                params={
-                    "username": username,
-                    "limit": 200,
-                    "offset": offset,
-                    "order": "desc",
-                    "source": "realtime",
-                },
-            )
-            response.raise_for_status()
-            payload = response.json()
-            batch = [item for item in (payload.get("messages") or []) if isinstance(item, dict)]
-            if not batch:
+    client = http_client()
+    while len(collected) < limit_total:
+        response = await client.get(
+            f"{upstream_base.rstrip('/')}/api/chat/messages",
+            params={
+                "username": username,
+                "limit": 200,
+                "offset": offset,
+                "order": "desc",
+                "source": "realtime",
+            },
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        batch = [item for item in (payload.get("messages") or []) if isinstance(item, dict)]
+        if not batch:
+            break
+        stop_page = False
+        for item in batch:
+            try:
+                created = int(item.get("createTime") or 0)
+            except (TypeError, ValueError):
+                created = 0
+            if created and created < cutoff:
+                stop_page = True
                 break
-            stop_page = False
-            for item in batch:
-                try:
-                    created = int(item.get("createTime") or 0)
-                except (TypeError, ValueError):
-                    created = 0
-                if created and created < cutoff:
-                    stop_page = True
-                    break
-                collected.append(item)
-            if stop_page or not payload.get("hasMore"):
-                break
-            offset += len(batch)
+            collected.append(item)
+        if stop_page or not payload.get("hasMore"):
+            break
+        offset += len(batch)
     return collected
 
 
@@ -342,6 +345,18 @@ async def _repair_images(reader: WeChatDB, hub: Hub) -> None:
             await asyncio.sleep(0)
     if fixed:
         logger.info("已给 {} 张旧图片卡片补上图片地址", fixed)
+    stickers = 0
+    for card_id in await asyncio.to_thread(persist.emoji_without_media):
+        md5, url = await asyncio.to_thread(reader.emoji_media, card_id)
+        if not md5 or not url:
+            continue
+        media = "/api/wxemoji?md5=" + quote(md5, safe="") + "&u=" + quote(url, safe="")
+        hub.patch(card_id, {"mediaUrl": media}, notify=False)
+        stickers += 1
+        if stickers % 50 == 0:
+            await asyncio.sleep(0)
+    if stickers:
+        logger.info("已给 {} 条旧表情卡片补上贴纸地址", stickers)
 
 
 async def backfill_history(
@@ -465,7 +480,7 @@ async def _stream_round(
 
     async def pull_worker() -> None:
         last = 0.0
-        timeout = httpx.Timeout(8.0, connect=3.0)
+        client = http_client()
         while not stop.is_set():
             try:
                 await asyncio.wait_for(pull_event.wait(), timeout=1.0)
@@ -482,8 +497,7 @@ async def _stream_round(
             if not settings.get("groups"):
                 continue
             try:
-                async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
-                    await _pull_watched_groups(client, settings, settings_store, hub, token_index)
+                await _pull_watched_groups(client, settings, settings_store, hub, token_index)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -515,8 +529,7 @@ def _watched_rooms(settings: dict[str, Any]) -> set[str] | None:
     groups = settings.get("groups") or []
     if not groups:
         return None
-    blocked = {str(item) for item in settings.get("blocked_groups") or []}
-    return {str(item["id"]) for item in groups if str(item["id"]) not in blocked}
+    return {str(item["id"]) for item in groups if str(item.get("id") or "").endswith("@chatroom")}
 
 
 async def _direct_round(
@@ -632,7 +645,6 @@ async def supervise(
         current = (
             settings["upstream_base"],
             tuple(item["id"] for item in settings["groups"]),
-            tuple(settings.get("blocked_groups") or []),
         )
         if current != signature:
             signature = current

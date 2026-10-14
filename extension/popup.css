@@ -17,7 +17,16 @@ body {
   background: #fff;
 }
 
-.brand { display: grid; min-width: 0; }
+.brand { display: flex; gap: 8px; align-items: center; min-width: 0; }
+
+.brand img {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  flex: none;
+}
+
+.brand > div { display: grid; min-width: 0; }
 
 .brand strong { font-size: 15px; }
 
@@ -84,6 +93,221 @@ section { padding: 10px 14px 4px; }
 }
 
 .item span { display: grid; min-width: 0; }
+
+.surface-mode {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin: -4px 0 10px;
+  padding: 0 4px 0 12px;
+  color: #667085;
+  font-size: 12px;
+}
+
+.surface-mode button {
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid #e1e4ea;
+  border-radius: 999px;
+  background: #fff;
+  color: #667085;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.surface-mode button.on {
+  border-color: #111827;
+  background: #111827;
+  color: #fff;
+  font-weight: 700;
+}
+
+.group-mgr {
+  margin: 4px 0 10px;
+  padding: 8px 10px 10px;
+  border-radius: 12px;
+  background: #fff;
+}
+
+.group-mgr summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.group-mgr .hint { margin: 6px 0 8px; padding: 0; }
+
+.gcol h4 { margin: 8px 0 4px; font-size: 12px; }
+
+.group-list {
+  display: grid;
+  gap: 2px;
+  max-height: 280px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.group-item { display: grid; gap: 4px; }
+
+.group-row {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  min-width: 0;
+}
+
+.group-row label { flex: 1; min-width: 0; }
+
+.group-members,
+.group-remove {
+  flex: none;
+  height: 22px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: #fff;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.group-members {
+  border: 1px solid #e1e4ea;
+  color: #344054;
+}
+
+.group-remove {
+  border: 1px solid #fecdca;
+  color: #b42318;
+}
+
+.member-panel {
+  margin: 0 0 4px 8px;
+  padding: 6px 8px;
+  border: 1px solid #eaecf0;
+  border-radius: 10px;
+  background: #f8fafc;
+}
+
+.listen-mode { display: flex; gap: 4px; margin-bottom: 6px; }
+
+.listen-mode button {
+  flex: 1;
+  height: 24px;
+  border: 1px solid #e1e4ea;
+  border-radius: 999px;
+  background: #fff;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.listen-mode button.on {
+  background: #111827;
+  color: #fff;
+  border-color: #111827;
+}
+
+.member-filter {
+  width: 100%;
+  height: 24px;
+  margin-bottom: 4px;
+  border: 1px solid #e1e4ea;
+  border-radius: 6px;
+  padding: 0 8px;
+  font: inherit;
+  font-size: 12px;
+}
+
+.member-list {
+  display: grid;
+  gap: 2px;
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+.member-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 24px;
+  font-size: 12px;
+}
+
+.member-row img {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex: none;
+}
+
+.member-row .name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.member-star {
+  flex: none;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  color: #98a2b3;
+  font-size: 14px;
+}
+
+.member-star.on { color: #d97706; }
+
+.member-mute {
+  flex: none;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  color: #98a2b3;
+  font-size: 11px;
+}
+.member-mute.on { color: #b42318; font-weight: 700; }
+.member-row.is-blocked .name { opacity: .45; text-decoration: line-through; }
+
+.star-palette {
+  position: fixed;
+  z-index: 40;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  width: 196px;
+  padding: 8px;
+  border-radius: 12px;
+  background: white;
+  box-shadow: 0 12px 32px rgba(16, 24, 40, 0.28);
+}
+
+.star-palette button {
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.star-palette button[data-color=""] {
+  width: auto;
+  border-radius: 999px;
+  padding: 0 8px;
+  background: #f2f4f7;
+}
+
+.group-list label {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  min-height: 24px;
+  font-size: 12px;
+  cursor: pointer;
+}
 
 small { color: #667085; font-size: 12px; font-weight: 400; }
 

@@ -107,7 +107,10 @@ class CardStore:
         before_received: int | None = None,
         conversation_id: str | None = None,
         blocked: list[str] | None = None,
+        allowed: list[str] | None = None,
         ca_only: bool = False,
+        senders_by_group: dict[str, list[str]] | None = None,
+        blocked_senders: list[str] | None = None,
     ) -> tuple[list[dict[str, Any]], bool]:
         cutoff = self.cutoff()
         size = max(1, min(int(limit), 80))
@@ -116,14 +119,17 @@ class CardStore:
         cursor = before
         cursor_received = before_received
         guard = 0
-        while len(collected) < size and guard < 8:
+        blocked_set = {str(item) for item in (blocked_senders or []) if item}
+        scanning = bool(ca_only or senders_by_group or blocked_set)
+        while len(collected) < size and guard < (24 if scanning else 8):
             guard += 1
             batch, more = self._fetch_newest(
-                limit=80 if ca_only else size - len(collected) + 1,
+                limit=120 if scanning else size - len(collected) + 1,
                 before=cursor,
                 before_received=cursor_received,
                 conversation_id=conversation_id,
                 blocked=blocked,
+                allowed=allowed,
                 cutoff=cutoff,
             )
             if not batch:
@@ -135,6 +141,10 @@ class CardStore:
             for index, item in enumerate(batch):
                 if ca_only and not (item.get("addresses") or item.get("cas")):
                     continue
+                if blocked_set and str(item.get("senderUsername") or "") in blocked_set:
+                    continue
+                if not self._sender_allowed(item, senders_by_group):
+                    continue
                 collected.append(item)
                 if len(collected) >= size:
                     has_more = index + 1 < len(batch) or more
@@ -144,6 +154,19 @@ class CardStore:
                 break
         return collected[:size], has_more
 
+    @staticmethod
+    def _sender_allowed(
+        item: dict[str, Any],
+        senders_by_group: dict[str, list[str]] | None,
+    ) -> bool:
+        if not senders_by_group:
+            return True
+        conversation_id = str(item.get("conversationId") or "")
+        if conversation_id not in senders_by_group:
+            return True
+        sender = str(item.get("senderUsername") or "")
+        return sender in set(senders_by_group[conversation_id])
+
     def _fetch_newest(
         self,
         *,
@@ -152,9 +175,11 @@ class CardStore:
         before_received: int | None,
         conversation_id: str | None,
         blocked: list[str] | None,
+        allowed: list[str] | None,
         cutoff: int,
     ) -> tuple[list[dict[str, Any]], bool]:
         blocked = blocked or []
+        allowed = [item for item in (allowed or []) if item]
         want = max(1, min(int(limit), 120))
         sql = "SELECT payload FROM cards WHERE create_time >= ?"
         args: list[Any] = [cutoff]
@@ -168,6 +193,10 @@ class CardStore:
         if conversation_id:
             sql += " AND conversation_id = ?"
             args.append(conversation_id)
+        elif allowed:
+            placeholders = ",".join("?" for _ in allowed)
+            sql += f" AND conversation_id IN ({placeholders})"
+            args.extend(allowed)
         if blocked:
             placeholders = ",".join("?" for _ in blocked)
             sql += f" AND conversation_id NOT IN ({placeholders})"
@@ -218,6 +247,16 @@ class CardStore:
             rows = self._conn.execute(
                 "SELECT id FROM cards WHERE create_time >= ? "
                 "AND json_extract(payload, '$.renderType') = 'image' "
+                "AND COALESCE(json_extract(payload, '$.mediaUrl'), '') = ''",
+                (self.cutoff(),),
+            ).fetchall()
+        return [str(row[0]) for row in rows]
+
+    def emoji_without_media(self) -> list[str]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id FROM cards WHERE create_time >= ? "
+                "AND json_extract(payload, '$.renderType') = 'emoji' "
                 "AND COALESCE(json_extract(payload, '$.mediaUrl'), '') = ''",
                 (self.cutoff(),),
             ).fetchall()
@@ -324,6 +363,7 @@ class CardStore:
             received_at=received_at,
             card_id=card_id,
             newer=False,
+            batch=80,
         )
         newer = self._fetch_side(
             conversation_id=conversation_id,
@@ -331,6 +371,7 @@ class CardStore:
             received_at=received_at,
             card_id=card_id,
             newer=True,
+            batch=80,
         )
         before: list[dict[str, Any]] = []
         for item in older:

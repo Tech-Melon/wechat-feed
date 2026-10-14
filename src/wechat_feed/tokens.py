@@ -14,6 +14,8 @@ from typing import Any
 import httpx
 from loguru import logger
 
+from .http import client as http_client
+
 _EVM = re.compile(r"0x[a-fA-F0-9]{40}(?![a-fA-F0-9])")
 _SUI = re.compile(r"0x[a-fA-F0-9]{64}(?![a-fA-F0-9])")
 _TRON = re.compile(r"\bT[1-9A-HJ-NP-Za-km-z]{33}\b")
@@ -67,6 +69,35 @@ _CHAIN_ALIAS = {
     "avalanche": "avax",
     "optimism": "op",
     "arbitrum": "arb",
+    "x-layer": "xlayer",
+}
+
+# 只把官网域名交给谷歌 s2 拉图标，避免直连官网被墙；下过一次就落在 data/chainicons/。
+_CHAIN_SITES = {
+    "sol": "solana.com",
+    "base": "base.org",
+    "bsc": "bnbchain.org",
+    "eth": "ethereum.org",
+    "robinhood": "robinhood.com",
+    "arc": "arc.network",
+    "tron": "tron.network",
+    "ton": "ton.org",
+    "sui": "sui.io",
+    "polygon": "polygon.technology",
+    "arb": "arbitrum.io",
+    "avax": "avax.network",
+    "op": "optimism.io",
+    "blast": "blast.io",
+    "monad": "monad.xyz",
+    "linea": "linea.build",
+    "scroll": "scroll.io",
+    "zksync": "zksync.io",
+    "sei": "sei.io",
+    "mantle": "mantle.xyz",
+    "ape": "apechain.com",
+    "hyperevm": "hyperliquid.xyz",
+    "plasma": "plasma.to",
+    "xlayer": "www.okx.com",
 }
 
 # OpenAPI token/info 用全称；页面 URL 仍用短链名。
@@ -80,22 +111,23 @@ _GMGN_API_CHAIN = {
     "solana": "sol",
 }
 
-_GMGN_FALLBACK = (
-    "bsc",
-    "base",
-    "eth",
-    "sol",
-    "arbitrum",
-    "hyperevm",
-    "tron",
-    "monad",
-    "robinhood",
-)
+# EVM 未定链时只搜这三条：search 命中即可，不再盲探 token/info。
+_EVM_SEARCH_CHAINS = ("bsc", "eth", "robinhood")
 
 
 def _norm_chain(value: str | None) -> str:
     text = str(value or "").strip().lower()
     return _CHAIN_ALIAS.get(text, text)
+
+
+def chain_favicon(name: str) -> tuple[str, str] | None:
+    """谷歌网站图标接口。只放行表内链，避免做成开放代理；直连官网可能访问不到。"""
+    key = _norm_chain(name)
+    domain = _CHAIN_SITES.get(key)
+    if not domain:
+        return None
+    url = f"https://www.google.com/s2/favicons?sz=64&domain={domain}"
+    return url, f"{key}.png"
 
 
 def gmgn_api_chain(value: str | None) -> str:
@@ -110,7 +142,7 @@ def candidate_chains(
     resolved: bool = False,
     dex_chain: str = "",
 ) -> list[str]:
-    """按地址形态给出 GMGN 探测顺序：Dex 定链优先，再按 kind 收窄。"""
+    """按地址形态给出 GMGN 探测顺序：已定链只留一条，EVM 只走 bsc / eth / robinhood。"""
     kind = _kind_of(address, hint or dex_chain)
     ordered: list[str] = []
 
@@ -133,37 +165,63 @@ def candidate_chains(
     if kind == "ton":
         add("ton")
         return ordered
-    if not resolved:
-        for item in _GMGN_FALLBACK:
+    if kind == "evm" and not resolved:
+        for item in _EVM_SEARCH_CHAINS:
             add(item)
     return ordered
 
 
-def chain_from_search(payload: dict[str, Any] | None, address: str) -> str:
+def _search_buckets(
+    payload: dict[str, Any] | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     if not isinstance(payload, dict):
-        return ""
-    coins: Any = payload.get("coins") or payload.get("tokens") or payload.get("list")
-    data = payload.get("data")
-    if isinstance(data, dict):
-        coins = data.get("coins") or data.get("tokens") or data.get("list") or coins
-    elif isinstance(data, list):
-        coins = data
-    if not isinstance(coins, list):
-        return ""
+        return [], []
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+    if not isinstance(data, dict):
+        return [], []
+    coins = data.get("coins") or data.get("tokens") or data.get("list") or []
+    wallets = data.get("wallets") or []
+    return (
+        [row for row in coins if isinstance(row, dict)],
+        [row for row in wallets if isinstance(row, dict)],
+    )
+
+
+def parse_search(
+    payload: dict[str, Any] | None, address: str
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """只认地址完全一致的 coin / wallet，避免把同名垃圾盘或钱包误当成代币。"""
     needle = str(address or "").lower()
-    fallback = ""
-    for row in coins:
-        if not isinstance(row, dict):
-            continue
-        chain = gmgn_api_chain(str(row.get("chain") or row.get("network") or ""))
-        if not chain:
-            continue
-        row_addr = str(row.get("address") or row.get("token_address") or "").lower()
-        if needle and row_addr == needle:
-            return chain
-        if not fallback:
-            fallback = chain
-    return fallback
+    coins, wallets = _search_buckets(payload)
+    if not needle:
+        return [], []
+    matched_coins = [
+        row
+        for row in coins
+        if str(row.get("address") or row.get("token_address") or "").lower() == needle
+    ]
+    matched_wallets = [
+        row for row in wallets if str(row.get("address") or "").lower() == needle
+    ]
+    return matched_coins, matched_wallets
+
+
+def chain_from_search(payload: dict[str, Any] | None, address: str) -> str:
+    coins, _wallets = parse_search(payload, address)
+    if not coins:
+        return ""
+    return gmgn_api_chain(str(coins[0].get("chain") or coins[0].get("network") or ""))
+
+
+def gmgn_address_url(chain: str, address: str) -> str:
+    mapped = _norm_chain(chain)
+    if mapped == "solana":
+        mapped = "sol"
+    if mapped in {"binance", "bnb"}:
+        mapped = "bsc"
+    if mapped:
+        return f"https://gmgn.ai/{mapped}/address/{address}"
+    return f"https://gmgn.ai/address/{address}"
 
 
 def gmgn_token_url(chain: str, address: str) -> str:
@@ -295,11 +353,7 @@ def _from_pair(pair: dict[str, Any], address: str, hint: str) -> dict[str, Any]:
         token = base
     symbol = str(token.get("symbol") or "").strip() or "TOKEN"
     name = str(token.get("name") or symbol).strip()
-    logo = ""
-    if chain:
-        logo = f"https://dd.dexscreener.com/ds-data/tokens/{chain}/{address}.png"
-    elif str(info.get("imageUrl") or "").strip():
-        logo = str(info.get("imageUrl") or "").strip()
+    logo = str(info.get("imageUrl") or "").strip()
     market_cap = 0.0
     for key in ("marketCap", "fdv"):
         try:
@@ -308,6 +362,9 @@ def _from_pair(pair: dict[str, Any], address: str, hint: str) -> dict[str, Any]:
             market_cap = 0.0
         if market_cap > 0:
             break
+    liq_obj = pair.get("liquidity")
+    liquidity = _num(liq_obj.get("usd") if isinstance(liq_obj, dict) else liq_obj)
+    created = _unix_seconds(pair.get("pairCreatedAt"))
     return {
         "address": address,
         "chain": chain or hint or "",
@@ -329,10 +386,10 @@ def _from_pair(pair: dict[str, Any], address: str, hint: str) -> dict[str, Any]:
         "renounced": "",
         "top10": "",
         "launchpad": "",
-        "liquidity": 0,
-        "liquidityText": "—",
+        "liquidity": liquidity,
+        "liquidityText": format_mcap(liquidity) if liquidity else "—",
         "holders": 0,
-        "createdAt": 0,
+        "createdAt": created,
     }
 
 
@@ -398,8 +455,6 @@ def _from_gmgn(
     except (TypeError, ValueError):
         top10_text = ""
     logo = str(info.get("logo") or "").strip()
-    if not logo and chain:
-        logo = f"https://dd.dexscreener.com/ds-data/tokens/{chain}/{address}.png"
     return {
         "address": address,
         "chain": chain,
@@ -425,6 +480,151 @@ def _from_gmgn(
         "liquidityText": format_mcap(liquidity) if liquidity else "—",
         "holders": holders,
         "createdAt": created,
+    }
+
+
+def _num(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return default
+
+
+def _unix_seconds(value: Any) -> int:
+    number = _num(value)
+    if number >= 1_000_000_000_000:
+        number /= 1000
+    return int(number) if number > 0 else 0
+
+
+def _best_coin(coins: list[dict[str, Any]]) -> dict[str, Any]:
+    return max(coins, key=lambda row: _num(row.get("liquidity")))
+
+
+def _from_search(row: dict[str, Any], address: str) -> dict[str, Any]:
+    chain = gmgn_api_chain(str(row.get("chain") or row.get("network") or ""))
+    price = _num(row.get("price"))
+    liquidity = _num(row.get("liquidity"))
+    market_cap = _num(row.get("market_cap") or row.get("usd_market_cap"))
+    holders = int(_num(row.get("holder_count")))
+    created = int(
+        _num(row.get("created_at") or row.get("creation_timestamp") or row.get("open_timestamp"))
+    )
+    honeypot = row.get("is_honeypot")
+    if honeypot is True or honeypot in {1, "1", "yes", "true"}:
+        honeypot_text = "yes"
+    elif honeypot is False or honeypot in {0, "0", "no", "false"}:
+        honeypot_text = "no"
+    else:
+        honeypot_text = str(honeypot or "")
+    logo = str(row.get("logo") or "").strip()
+    return {
+        "address": address,
+        "chain": chain,
+        "symbol": str(row.get("symbol") or "").strip() or "TOKEN",
+        "name": str(row.get("name") or row.get("symbol") or "").strip(),
+        "logo": logo,
+        "marketCap": market_cap,
+        "marketCapText": format_mcap(market_cap) if market_cap else "—",
+        "priceUsd": str(row.get("price") or "") if price else "",
+        "url": gmgn_token_url(chain or "bsc", address),
+        "source": "gmgn-search",
+        "twitter": str(row.get("twitter") or row.get("twitter_username") or "").strip(),
+        "website": str(row.get("website") or "").strip(),
+        "telegram": str(row.get("telegram") or "").strip(),
+        "buyTax": format_tax(row.get("buy_tax")) if row.get("buy_tax") not in (None, "") else "",
+        "sellTax": format_tax(row.get("sell_tax")) if row.get("sell_tax") not in (None, "") else "",
+        "honeypot": honeypot_text,
+        "openSource": "",
+        "renounced": "",
+        "top10": "",
+        "launchpad": str(row.get("launchpad_platform") or row.get("launchpad") or "").strip(),
+        "liquidity": liquidity,
+        "liquidityText": format_mcap(liquidity) if liquidity else "—",
+        "holders": holders,
+        "createdAt": created,
+    }
+
+
+def _from_wallet(address: str, wallets: list[dict[str, Any]]) -> dict[str, Any]:
+    by_chain: dict[str, dict[str, Any]] = {}
+    for row in wallets:
+        chain = gmgn_api_chain(str(row.get("chain") or ""))
+        if chain and chain not in by_chain:
+            by_chain[chain] = row
+    ordered: list[dict[str, Any]] = []
+    for chain in ("eth", "bsc", "robinhood"):
+        if chain in by_chain:
+            ordered.append(by_chain[chain])
+    for row in wallets:
+        if row not in ordered:
+            ordered.append(row)
+    top = ordered[0] if ordered else {}
+    chain = gmgn_api_chain(str(top.get("chain") or ""))
+    chains: list[str] = []
+    for row in wallets:
+        item = gmgn_api_chain(str(row.get("chain") or ""))
+        if item and item not in chains:
+            chains.append(item)
+    name = str(top.get("twitter_name") or top.get("ens") or top.get("remark_name") or "").strip()
+    twitter = str(top.get("twitter_username") or "").strip()
+    return {
+        "address": address,
+        "chain": chain,
+        "chains": chains,
+        "symbol": "",
+        "name": name or "钱包地址",
+        "kind": "wallet",
+        "note": "这是钱包地址，不是代币合约",
+        "logo": str(top.get("avatar") or "").strip(),
+        "marketCap": 0,
+        "marketCapText": "—",
+        "priceUsd": "",
+        "url": gmgn_address_url(chain, address),
+        "source": "gmgn-wallet",
+        "twitter": twitter,
+        "website": "",
+        "telegram": "",
+        "buyTax": "",
+        "sellTax": "",
+        "honeypot": "",
+        "openSource": "",
+        "renounced": "",
+        "top10": "",
+        "launchpad": "",
+        "liquidity": 0,
+        "liquidityText": "—",
+        "holders": 0,
+        "createdAt": 0,
+    }
+
+
+def _unresolved(address: str, hint: str) -> dict[str, Any]:
+    return {
+        "address": address,
+        "chain": hint,
+        "symbol": "",
+        "name": "",
+        "logo": "",
+        "marketCap": 0,
+        "marketCapText": "—",
+        "priceUsd": "",
+        "url": gmgn_token_url(hint or "bsc", address),
+        "source": "unresolved",
+        "twitter": "",
+        "website": "",
+        "telegram": "",
+        "buyTax": "",
+        "sellTax": "",
+        "honeypot": "",
+        "openSource": "",
+        "renounced": "",
+        "top10": "",
+        "launchpad": "",
+        "liquidity": 0,
+        "liquidityText": "—",
+        "holders": 0,
+        "createdAt": 0,
     }
 
 
@@ -482,6 +682,9 @@ class TokenIndex:
         self._rate = RateWindow(_plan_weight())
         self._gmgn_cooldown = 0.0
 
+    def _client(self) -> httpx.AsyncClient:
+        return http_client()
+
     def _remember(self, key: str, value: dict[str, Any] | None) -> None:
         now = time.time()
         self._cache[key] = (now, value)
@@ -492,17 +695,38 @@ class TokenIndex:
         while len(self._cache) > _CACHE_MAX:
             del self._cache[next(iter(self._cache))]
 
-    async def resolve_many(self, cas: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    async def resolve_many(
+        self,
+        cas: list[dict[str, Any]],
+        on_partial: Callable[[list[dict[str, Any]]], None] | None = None,
+    ) -> list[dict[str, Any]]:
         if os.environ.get("WECHAT_FEED_DISABLE_TOKEN") == "1":
             return []
-        result: list[dict[str, Any]] = []
-        for item in cas:
-            resolved = await self.resolve_one(item)
-            if resolved is not None:
-                result.append(resolved)
-        return result
+        slots: list[dict[str, Any] | None] = [None] * len(cas)
 
-    async def resolve_one(self, item: dict[str, Any]) -> dict[str, Any] | None:
+        def emit() -> None:
+            if on_partial is None:
+                return
+            ready = [item for item in slots if item is not None]
+            if ready:
+                on_partial(ready)
+
+        async def one(index: int, item: dict[str, Any]) -> None:
+            def partial(token: dict[str, Any]) -> None:
+                slots[index] = token
+                emit()
+
+            slots[index] = await self.resolve_one(item, on_partial=partial)
+            emit()
+
+        await asyncio.gather(*[one(index, item) for index, item in enumerate(cas)])
+        return [item for item in slots if item is not None]
+
+    async def resolve_one(
+        self,
+        item: dict[str, Any],
+        on_partial: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any] | None:
         address = str(item.get("address") or "").strip()
         if not address:
             return None
@@ -510,11 +734,20 @@ class TokenIndex:
         async with self._lock:
             cached = self._cache.get(cache_key)
             if cached and time.time() - cached[0] < _CACHE_TTL:
-                return cached[1]
+                value = cached[1]
+                source = str((value or {}).get("source") or "") if value else ""
+                stale_dex = (
+                    source == "dexscreener"
+                    and time.time() - cached[0] >= 30
+                    and time.time() >= self._gmgn_cooldown
+                )
+                if not stale_dex:
+                    return value
         looked = await self._fetch(
             address,
             str(item.get("chain") or ""),
             bool(item.get("resolved")),
+            on_partial=on_partial,
         )
         async with self._lock:
             self._remember(cache_key, looked)
@@ -536,20 +769,17 @@ class TokenIndex:
                 **extra,
             }
             try:
-                async with httpx.AsyncClient(
-                    timeout=8.0,
-                    follow_redirects=True,
-                    trust_env=False,
-                ) as client:
-                    response = await client.get(
-                        f"https://openapi.gmgn.ai{path}",
-                        params=params,
-                        headers=_gmgn_headers(api_key),
-                    )
+                response = await self._client().get(
+                    f"https://openapi.gmgn.ai{path}",
+                    params=params,
+                    headers=_gmgn_headers(api_key),
+                )
                 last_status = response.status_code
                 if response.status_code in {429, 408}:
-                    self._rate.penalize(1.0)
-                    continue
+                    self._rate.penalize(8.0)
+                    self._gmgn_cooldown = max(self._gmgn_cooldown, time.time() + 8)
+                    logger.info("GMGN 限频 {} status={}", path, response.status_code)
+                    return None
                 if response.status_code in {401, 403}:
                     self._gmgn_cooldown = time.time() + 90
                     logger.info("GMGN 鉴权失败 status={}", response.status_code)
@@ -584,25 +814,70 @@ class TokenIndex:
     async def _gmgn_get(self, path: str, chain: str, address: str) -> dict[str, Any] | None:
         return await self._gmgn_call(path, {"chain": gmgn_api_chain(chain), "address": address})
 
-    async def _gmgn_search_chain(self, address: str) -> str:
-        payload = await self._gmgn_call("/v1/market/search", {"q": address})
-        chain = chain_from_search(payload, address)
+    async def _gmgn_search(self, address: str, chain: str = "") -> dict[str, Any] | None:
+        extra = {"q": address}
         if chain:
-            logger.info("GMGN search 定链 {} -> {}", address[:10], chain)
-        return chain
+            extra["chain"] = gmgn_api_chain(chain)
+        return await self._gmgn_call("/v1/market/search", extra)
 
-    async def _fetch(self, address: str, hint: str, resolved: bool) -> dict[str, Any] | None:
+    async def _search_hits(self, address: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        payload = await self._gmgn_search(address)
+        if payload is None:
+            return [], []
+        coins, wallets = parse_search(payload, address)
+        if coins or wallets or _kind_of(address) != "evm":
+            return coins, wallets
+        gathered = await asyncio.gather(
+            *[self._gmgn_search(address, chain) for chain in _EVM_SEARCH_CHAINS],
+            return_exceptions=True,
+        )
+        seen_coins: set[tuple[str, str]] = set()
+        seen_wallets: set[tuple[str, str]] = set()
+        for item in gathered:
+            if not isinstance(item, dict):
+                continue
+            more_coins, more_wallets = parse_search(item, address)
+            for row in more_coins:
+                key = (
+                    gmgn_api_chain(str(row.get("chain") or row.get("network") or "")),
+                    str(row.get("address") or "").lower(),
+                )
+                if key in seen_coins:
+                    continue
+                seen_coins.add(key)
+                coins.append(row)
+            for row in more_wallets:
+                key = (
+                    gmgn_api_chain(str(row.get("chain") or "")),
+                    str(row.get("address") or "").lower(),
+                )
+                if key in seen_wallets:
+                    continue
+                seen_wallets.add(key)
+                wallets.append(row)
+        return coins, wallets
+
+    async def _gmgn_pair(self, chain: str, address: str) -> dict[str, Any] | None:
+        info = await self._gmgn_get("/v1/token/info", chain, address)
+        if not info or not (info.get("symbol") or info.get("address")):
+            return None
+        security = await self._gmgn_get("/v1/token/security", chain, address)
+        return _from_gmgn(info, security, chain, address)
+
+    async def _dexscreener(self, address: str, hint: str) -> dict[str, Any] | None:
         url = f"https://api.dexscreener.com/latest/dex/tokens/{address}"
-        payload: dict[str, Any] = {}
         try:
-            async with httpx.AsyncClient(timeout=8.0) as client:
-                response = await client.get(url, headers={"user-agent": "wechat-feed/0.2"})
-                response.raise_for_status()
-                loaded = response.json()
-                if isinstance(loaded, dict):
-                    payload = loaded
+            response = await self._client().get(
+                url,
+                headers={"user-agent": "wechat-feed/0.2"},
+                timeout=2.5,
+            )
+            response.raise_for_status()
+            loaded = response.json()
         except Exception as exc:
             logger.info("DexScreener 查询失败: {}", type(exc).__name__)
+            return None
+        payload = loaded if isinstance(loaded, dict) else {}
         pairs = [row for row in (payload.get("pairs") or []) if isinstance(row, dict)]
         hint_norm = _norm_chain(hint)
         if hint_norm:
@@ -615,59 +890,55 @@ class TokenIndex:
             key=lambda row: float((row.get("liquidity") or {}).get("usd") or 0),
             reverse=True,
         )
-        dex = None
-        dex_chain = ""
-        if pairs:
-            dex = _from_pair(pairs[0], address, hint_norm)
-            dex_chain = str(dex.get("chain") or "")
-            if dex_chain:
-                hint_norm = dex_chain
-        chains = candidate_chains(
-            address,
-            hint_norm,
-            resolved=resolved,
-            dex_chain=dex_chain,
-        )
-        if not resolved and not dex_chain:
-            searched = await self._gmgn_search_chain(address)
-            if searched:
-                chains = [searched, *[item for item in chains if item != searched]]
-        gmgn_info = None
-        used_chain = hint_norm
-        for chain in chains[:4]:
-            gmgn_info = await self._gmgn_get("/v1/token/info", chain, address)
-            if gmgn_info and (gmgn_info.get("symbol") or gmgn_info.get("address")):
-                used_chain = chain
-                break
-            gmgn_info = None
-        if gmgn_info:
-            security = await self._gmgn_get("/v1/token/security", used_chain, address)
-            return _from_gmgn(gmgn_info, security, used_chain, address)
+        if not pairs:
+            return None
+        return _from_pair(pairs[0], address, hint_norm)
+
+    async def _fetch(
+        self,
+        address: str,
+        hint: str,
+        resolved: bool,
+        on_partial: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any] | None:
+        hint_norm = _norm_chain(hint)
+
+        async def enrich(chain: str, seed: dict[str, Any] | None) -> dict[str, Any] | None:
+            if seed and on_partial:
+                on_partial(seed)
+            if not chain:
+                return seed
+            gmgn = await self._gmgn_pair(chain, address)
+            return gmgn or seed
+
+        if resolved and hint_norm:
+            gmgn = await self._gmgn_pair(hint_norm, address)
+            if gmgn:
+                return gmgn
+
+        coins, wallets = await self._search_hits(address)
+        if coins:
+            coin = _best_coin(coins)
+            chain = gmgn_api_chain(str(coin.get("chain") or coin.get("network") or hint_norm))
+            logger.info("GMGN search 命中 {} -> {}", address[:10], chain or "?")
+            found = await enrich(chain, _from_search(coin, address))
+            if found:
+                return found
+        if wallets:
+            card = _from_wallet(address, wallets)
+            logger.info(
+                "GMGN search 钱包 {} chains={}",
+                address[:10],
+                ",".join(card.get("chains") or []),
+            )
+            if on_partial:
+                on_partial(card)
+            return card
+
+        dex = await self._dexscreener(address, hint_norm)
         if dex:
-            return dex
-        return {
-            "address": address,
-            "chain": hint,
-            "symbol": "",
-            "name": "",
-            "logo": "",
-            "marketCap": 0,
-            "marketCapText": "—",
-            "priceUsd": "",
-            "url": gmgn_token_url(hint or "bsc", address),
-            "source": "unresolved",
-            "twitter": "",
-            "website": "",
-            "telegram": "",
-            "buyTax": "",
-            "sellTax": "",
-            "honeypot": "",
-            "openSource": "",
-            "renounced": "",
-            "top10": "",
-            "launchpad": "",
-            "liquidity": 0,
-            "liquidityText": "—",
-            "holders": 0,
-            "createdAt": 0,
-        }
+            chain = str(dex.get("chain") or "")
+            found = await enrich(chain, dex)
+            if found:
+                return found
+        return _unresolved(address, hint)

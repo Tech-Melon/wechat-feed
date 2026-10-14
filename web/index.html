@@ -4,16 +4,18 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="robots" content="noindex" />
-    <title>微信群信息流</title>
+    <title>技术瓜群流</title>
     <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
-    <link rel="stylesheet" href="/assets/app.css?v=0.7.1" />
+    <link rel="icon" href="/assets/favicon.png" type="image/png" sizes="128x128" />
+    <link rel="apple-touch-icon" href="/assets/favicon.png" />
+    <link rel="stylesheet" href="/assets/app.css?v=0.8.9" />
   </head>
   <body>
     <header class="top">
       <div class="brand">
-        <span class="mark">群</span>
+        <img class="mark" src="/assets/favicon.svg" width="38" height="38" alt="技术瓜群流" />
         <div>
-          <strong>微信群信息流</strong>
+          <strong>技术瓜群流</strong>
           <p>本机只读 · 群消息实时卡片</p>
         </div>
       </div>
@@ -45,8 +47,18 @@
           <strong>浏览器插件</strong>
         </div>
         <label class="toggle"><input id="gmgn" type="checkbox" /> 插入 gmgn 推特信息流</label>
+        <div class="surface-mode" data-surface="gmgn">
+          <span>该通路显示</span>
+          <button type="button" data-mode="all">全部消息</button>
+          <button type="button" data-mode="ca">只看 CA</button>
+        </div>
         <label class="toggle"><input id="float-panel" type="checkbox" /> 白名单网页浮窗（可拖拽缩放，网址在插件弹窗里设置）</label>
-        <p>默认关闭。打开后使用本页已保存的备注、星标和群配置。</p>
+        <div class="surface-mode" data-surface="float">
+          <span>该通路显示</span>
+          <button type="button" data-mode="all">全部消息</button>
+          <button type="button" data-mode="ca">只看 CA</button>
+        </div>
+        <p>三条通路各自选全部 / 只看 CA，互不影响。群来源在下方「群聊选择管理」里勾。</p>
       </div>
     </section>
 
@@ -70,7 +82,22 @@
     </div>
 
     <section class="tools">
-      <div id="groups" class="groups"></div>
+      <section class="group-mgr">
+        <header>
+          <strong>群聊选择管理</strong>
+          <p>两套来源互不影响，可同时多选。全选表示包括以后新加的监控群。展开群可看成员：监听全员或只听部分人，也可星标、屏蔽某人。监控群的消息仍会全盘入库，这里只决定显示谁。</p>
+        </header>
+        <div class="group-cols">
+          <div class="group-col" data-feed="all">
+            <h3>全部消息来源</h3>
+            <div class="group-list" id="groups-all"></div>
+          </div>
+          <div class="group-col" data-feed="ca">
+            <h3>只看 CA 来源</h3>
+            <div class="group-list" id="groups-ca"></div>
+          </div>
+        </div>
+      </section>
       <div id="blocked" class="blocked"></div>
       <div class="tool-row">
         <form id="add-form">
@@ -94,10 +121,10 @@
     <main id="feed" class="feed"></main>
     <div id="more" class="more" hidden>加载更早的消息…</div>
     <footer class="site-foot">
-      微信群信息流 · 作者 <a href="https://x.com/0xTechMelon" target="_blank" rel="noreferrer">@0xTechMelon</a>
+      技术瓜群流 · 作者 <a href="https://x.com/0xTechMelon" target="_blank" rel="noreferrer">@0xTechMelon</a>
       · 更多产品见 <a href="https://docs.jishugua.top" target="_blank" rel="noreferrer">docs.jishugua.top</a>
     </footer>
-    <script src="/shared/feed.js?v=0.7.1"></script>
-    <script src="/assets/app.js?v=0.7.1"></script>
+    <script src="/shared/feed.js?v=0.8.9"></script>
+    <script src="/assets/app.js?v=0.8.9"></script>
   </body>
 </html>

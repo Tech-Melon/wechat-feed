@@ -3,19 +3,25 @@
   if (globalThis.__wechatFeedLoaded) return;
   globalThis.__wechatFeedLoaded = true;
   const API = "http://127.0.0.1:8765";
+  if (typeof WechatFeed !== "undefined" && WechatFeed.setApiBase) WechatFeed.setApiBase(API);
   const DEFAULT_FLOAT_SITES = ["https://gmgn.ai/follow?target=xTracker"];
   let floatSites = DEFAULT_FLOAT_SITES;
-  let watermark = "";
   let lastHref = location.href;
   const cards = new Map();
   let settings = {
     gmgn_overlay: false,
     float_panel: false,
     ca_only: false,
+    gmgn_ca_only: false,
+    float_ca_only: false,
+    all_feed_groups: [],
+    ca_feed_groups: [],
     user_remarks: {},
     group_remarks: {},
     starred_users: [],
     blocked_groups: [],
+    blocked_users: [],
+    group_users: {},
   };
   let port = null;
   let hasMore = false;
@@ -80,8 +86,20 @@
     return floatOn() && floatAllowed();
   }
 
+  function extensionAlive() {
+    try {
+      return Boolean(chrome.runtime?.id);
+    } catch (error) {
+      return false;
+    }
+  }
+
   function send(type, payload = {}, attempt = 0) {
     return new Promise((resolve) => {
+      if (!extensionAlive()) {
+        resolve({ ok: false, detail: "插件已更新，刷新页面后再用" });
+        return;
+      }
       try {
         chrome.runtime.sendMessage({ type, ...payload }, (result) => {
           const err = chrome.runtime.lastError;
@@ -133,15 +151,12 @@
     if (next.mediaFullUrl && next.mediaFullUrl.startsWith("/")) {
       next.mediaFullUrl = `${API}${next.mediaFullUrl}`;
     }
-    next.watermark = watermark;
     return next;
   }
 
-  function visibleCards() {
-    const blocked = new Set(settings.blocked_groups || []);
+  function visibleCards(caOnly) {
     return Array.from(cards.values())
-      .filter((card) => !blocked.has(card.conversationId))
-      .filter((card) => !settings.ca_only || (card.addresses || []).length)
+      .filter((card) => typeof WechatFeed !== "undefined" && WechatFeed.cardInFeed(card, settings, Boolean(caOnly)))
       .sort((a, b) => (b.createTime || 0) - (a.createTime || 0));
   }
 
@@ -153,12 +168,20 @@
     return result.dataUrl;
   }
 
-  // 新消息到达时微信可能还在下载缩略图，图片多试几次再换回「[图片]」。
-  async function loadMedia(img, url) {
+  // 浮窗/插入流走 data URL：必须先拉 hd=1，缩略 _t 原生只有一两百像素，CSS 放大不了。
+  async function loadMedia(img, thumbUrl) {
+    const full = img.dataset.wfFull || "";
+    if (full) {
+      const hd = await proxied(full);
+      if (hd && img.isConnected) {
+        img.src = hd;
+        return;
+      }
+    }
     for (const wait of [0, 1500, 4000, 10000]) {
       if (wait) await new Promise((resolve) => setTimeout(resolve, wait));
       if (!img.isConnected) return;
-      const dataUrl = await proxied(url);
+      const dataUrl = await proxied(thumbUrl);
       if (dataUrl) {
         img.src = dataUrl;
         return;
@@ -166,7 +189,7 @@
     }
     const miss = document.createElement("span");
     miss.className = "wf-media-miss";
-    miss.textContent = "[图片]";
+    miss.textContent = img.classList.contains("wf-emoji") ? "[表情]" : "[图片]";
     img.replaceWith(miss);
   }
 
@@ -176,16 +199,34 @@
       nodes.map(async (img) => {
         if ((img.getAttribute("src") || "").startsWith("data:")) return;
         const src = img.getAttribute("data-wf-src") || img.getAttribute("src") || "";
-        if (!src.includes("127.0.0.1:8765") && !src.includes("localhost:8765")) return;
+        const isLocal = src.includes("127.0.0.1:8765") || src.includes("localhost:8765") || src.startsWith("/");
+        const isTokenImg = img.classList.contains("wf-token-logo") || img.classList.contains("wf-token-hero");
+        if (!src || (!isLocal && !isTokenImg)) return;
         const url = src.startsWith("http") ? src : `${API}${src}`;
         img.removeAttribute("src");
         img.removeAttribute("data-wf-src");
-        if (img.classList.contains("wf-media")) {
+        if (img.classList.contains("wf-media") || img.classList.contains("wf-emoji")) {
           await loadMedia(img, url);
           return;
         }
         const dataUrl = await proxied(url);
-        if (dataUrl) img.src = dataUrl;
+        if (dataUrl) {
+          img.src = dataUrl;
+          return;
+        }
+        if (img.classList.contains("wf-chain-ico")) {
+          img.remove();
+          return;
+        }
+        if (img.classList.contains("wf-token-logo")) {
+          const letter = document.createElement("span");
+          letter.className = "wf-token-logo wf-token-fallback";
+          const sym = img.closest(".wf-token")?.querySelector(".wf-token-title strong")?.textContent || "?";
+          letter.textContent = String(sym).replace("$", "").slice(0, 1) || "?";
+          img.replaceWith(letter);
+          return;
+        }
+        if (isTokenImg) img.remove();
       }),
     );
   }
@@ -197,9 +238,9 @@
         box = document.createElement("div");
         box.className = "wf-ask";
         box.innerHTML = `<style>
-          .wf-ask{position:absolute;inset:0;display:grid;place-items:center;background:rgba(16,24,40,.42);z-index:9;}
+          .wf-ask{position:absolute;inset:0;display:grid;place-items:center;background:rgba(16,24,40,.42);z-index:9;pointer-events:auto;}
           .wf-ask[hidden]{display:none;}
-          .wf-ask-card{width:min(320px,calc(100% - 24px));padding:14px;border-radius:16px;background:#fff7f2;color:#101828;font:13px/1.5 sans-serif;}
+          .wf-ask-card{width:min(320px,calc(100% - 24px));padding:14px;border-radius:16px;background:#fff7f2;color:#101828;font:13px/1.5 sans-serif;box-shadow:0 16px 40px rgba(16,24,40,.28);}
           .wf-ask-card h3{margin:0 0 10px;}
           .wf-ask-card input{width:100%;height:36px;border:1px solid #f9d2c4;border-radius:10px;padding:0 10px;}
           .wf-ask-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:12px;}
@@ -209,6 +250,7 @@
         <div class="wf-ask-card"><h3></h3><input /><div class="wf-ask-actions"><button type="button" data-ok>确定</button><button type="button" class="ghost" data-cancel>取消</button></div></div>`;
         root.append(box);
       }
+      if (typeof box._finish === "function") box._finish(null);
       const titleNode = box.querySelector("h3");
       const input = box.querySelector("input");
       titleNode.textContent = title;
@@ -217,11 +259,21 @@
       input.focus();
       input.select();
       const finish = (result) => {
+        if (box._finish !== finish) return;
+        box._finish = null;
         box.hidden = true;
         resolve(result);
       };
+      box._finish = finish;
       box.querySelector("[data-ok]").onclick = () => finish(input.value);
       box.querySelector("[data-cancel]").onclick = () => finish(null);
+      box.onclick = (event) => {
+        if (event.target === box) finish(null);
+      };
+      input.onkeydown = (event) => {
+        if (event.key === "Enter") finish(input.value);
+        if (event.key === "Escape") finish(null);
+      };
     });
   }
 
@@ -256,10 +308,37 @@
     });
   }
 
+  function sizeToBox(el, maxW, maxH) {
+    const nw = el.naturalWidth;
+    const nh = el.naturalHeight;
+    if (!nw || !nh) return false;
+    const scale = Math.min(maxW / nw, maxH / nh);
+    el.style.width = `${Math.round(nw * scale)}px`;
+    el.style.height = `${Math.round(nh * scale)}px`;
+    return true;
+  }
+
+  function placePreview(el, img) {
+    const rect = img.getBoundingClientRect();
+    const previewWidth = el.offsetWidth || Math.min(480, window.innerWidth - 24);
+    const previewHeight = el.offsetHeight || 80;
+    let left = rect.right + 12;
+    if (left + previewWidth > window.innerWidth - 8) left = Math.max(8, rect.left - previewWidth - 12);
+    const top = Math.max(8, Math.min(rect.top, window.innerHeight - previewHeight - 8));
+    el.style.left = `${left}px`;
+    el.style.top = `${top}px`;
+  }
+
   function showImagePreview(img) {
     const src = img.currentSrc || img.getAttribute("src") || "";
     if (!src) return;
     const full = img.dataset.wfFull;
+    const maxW = Math.min(480, window.innerWidth - 24);
+    const maxH = Math.min(560, window.innerHeight - 24);
+    const layout = () => {
+      sizeToBox(imagePreview, maxW, maxH);
+      placePreview(imagePreview, img);
+    };
     if (full) {
       proxied(full).then((dataUrl) => {
         if (dataUrl && imagePreview && imagePreview.dataset.from === src) imagePreview.src = dataUrl;
@@ -268,18 +347,13 @@
     if (!imagePreview) {
       imagePreview = document.createElement("img");
       imagePreview.alt = "预览";
-      imagePreview.style.cssText = "position:fixed;z-index:2147483647;max-width:min(480px, calc(100vw - 24px));max-height:min(560px, calc(100vh - 24px));border-radius:12px;box-shadow:0 18px 50px rgba(0,0,0,.38);pointer-events:none;background:#111;object-fit:contain;";
+      imagePreview.style.cssText = "position:fixed;z-index:2147483647;border-radius:12px;box-shadow:0 18px 50px rgba(0,0,0,.38);pointer-events:none;background:#111;object-fit:contain;";
       document.documentElement.append(imagePreview);
     }
     imagePreview.dataset.from = src;
+    imagePreview.onload = layout;
     imagePreview.src = (full && avatarCache.get(full)) || src;
-    const rect = img.getBoundingClientRect();
-    const previewWidth = Math.min(480, window.innerWidth - 24);
-    let left = rect.right + 12;
-    if (left + previewWidth > window.innerWidth - 8) left = Math.max(8, rect.left - previewWidth - 12);
-    const top = Math.max(8, Math.min(rect.top, window.innerHeight - 80));
-    imagePreview.style.left = `${left}px`;
-    imagePreview.style.top = `${top}px`;
+    if (imagePreview.complete) layout();
     imagePreview.style.display = "block";
   }
 
@@ -289,11 +363,50 @@
     imagePreview.dataset.from = "";
   }
 
+  function showImageLightbox(img) {
+    hideImagePreview();
+    const src = img.currentSrc || img.getAttribute("src") || "";
+    if (!src) return;
+    const full = img.dataset.wfFull;
+    const overlay = document.createElement("div");
+    overlay.style.cssText = "position:fixed;inset:0;z-index:2147483647;background:rgba(0,0,0,.78);display:flex;align-items:center;justify-content:center;cursor:zoom-out;";
+    const picture = document.createElement("img");
+    picture.alt = "";
+    picture.style.cssText = "border-radius:12px;box-shadow:0 18px 50px rgba(0,0,0,.45);background:#111;object-fit:contain;";
+    const maxW = window.innerWidth * 0.92;
+    const maxH = window.innerHeight * 0.92;
+    picture.onload = () => sizeToBox(picture, maxW, maxH);
+    picture.src = src;
+    overlay.append(picture);
+    overlay.addEventListener("click", () => overlay.remove());
+    document.documentElement.append(overlay);
+    if (!full) return;
+    avatarCache.delete(full);
+    proxied(full).then((dataUrl) => {
+      if (dataUrl && overlay.isConnected) picture.src = dataUrl;
+    });
+  }
+
   function bindList(root, list, { askRoot } = {}) {
     if (list.dataset.wfBound) return;
     list.dataset.wfBound = "1";
     const dialogIn = () => (askRoot ? askRoot() : root);
     list.addEventListener("click", async (event) => {
+      if (event.target.closest("a.wf-text-link, a.wf-token-link")) return;
+      const fmtBtn = event.target.closest("[data-mcap-format]");
+      if (fmtBtn) {
+        const next = fmtBtn.dataset.mcapFormat === "en" ? "en" : "cn";
+        settings.mcap_format = next;
+        if (typeof WechatFeed !== "undefined") WechatFeed.setNumberFormat(next);
+        paintAll();
+        send("setMcapFormat", { format: next });
+        return;
+      }
+      const media = event.target.closest(".wf-media, .wf-emoji");
+      if (media) {
+        showImageLightbox(media);
+        return;
+      }
       const copy = event.target.closest("[data-copy]");
       if (copy) {
         navigator.clipboard.writeText(copy.dataset.copy || "");
@@ -332,6 +445,21 @@
         if (!saved?.ok) paintAll();
         return;
       }
+      const muteUser = event.target.closest("[data-mute-user]");
+      if (muteUser) {
+        const card = muteUser.closest("[data-user]");
+        const userId = card && card.dataset.user;
+        if (!userId) return;
+        const blocked = new Set(settings.blocked_users || []);
+        blocked.add(userId);
+        settings.blocked_users = Array.from(blocked);
+        for (const [id, item] of Array.from(cards.entries())) {
+          if (item.senderUsername === userId) cards.delete(id);
+        }
+        paintAll();
+        send("muteUser", { userId, blocked: true });
+        return;
+      }
       const mute = event.target.closest("[data-mute]");
       if (mute) {
         const card = mute.closest("[data-group]");
@@ -360,7 +488,7 @@
         else delete remarks[userId];
         settings.user_remarks = remarks;
         paintAll();
-        send("remarkUser", { userId, text: next });
+        send("remarkUser", { userId, text });
         return;
       }
       const group = event.target.closest("[data-remark-group]");
@@ -376,15 +504,15 @@
         else delete remarks[groupId];
         settings.group_remarks = remarks;
         paintAll();
-        send("remarkGroup", { groupId, text: next });
+        send("remarkGroup", { groupId, text });
       }
     });
     list.addEventListener("mouseover", (event) => {
-      const img = event.target.closest(".wf-media");
+      const img = event.target.closest(".wf-media, .wf-emoji");
       if (img) showImagePreview(img);
     });
     list.addEventListener("mouseout", (event) => {
-      const img = event.target.closest(".wf-media");
+      const img = event.target.closest(".wf-media, .wf-emoji");
       if (!img) return;
       const next = event.relatedTarget;
       if (next && img.contains(next)) return;
@@ -400,13 +528,16 @@
 
   function paintList(list, { gmgn, limit } = {}) {
     if (!list || typeof WechatFeed === "undefined") return;
-    const rows = visibleCards();
+    const rows = visibleCards(settings.float_ca_only);
     const max = limit || 80;
     const shown = rows.slice(0, max);
     const starred = new Set(settings.starred_users || []);
     const userRemarks = settings.user_remarks || {};
     const groupRemarks = settings.group_remarks || {};
-    const stamp = watermark + "#" + shown
+    const fmt = typeof WechatFeed !== "undefined" && WechatFeed.numberFormat
+      ? WechatFeed.numberFormat()
+      : (settings.mcap_format || "cn");
+    const stamp = `${fmt}|` + shown
       .map((card) => `${card.id}:${starred.has(card.senderUsername) ? 1 : 0}:${(settings.star_colors || {})[card.senderUsername] || ""}:${userRemarks[card.senderUsername] || ""}:${groupRemarks[card.conversationId] || ""}:${(card.tokenCards || []).length}`)
       .join("|");
     if (list.dataset.wfStamp === stamp) return;
@@ -415,7 +546,7 @@
       list.innerHTML = `<div class="empty">${cards.size ? "当前筛选下没有发言。" : "等待群里的新发言。"}</div>`;
       return;
     }
-    list.innerHTML = shown.map((card) => WechatFeed.gmgnCardHtml(present(card))).join("");
+    list.innerHTML = shown.map((card, index) => WechatFeed.gmgnCardHtml(present(card), WechatFeed.stackMeta(shown, index))).join("");
     hydrate(list);
   }
 
@@ -425,9 +556,10 @@
       const all = floatHost._all;
       const ca = floatHost._ca;
       if (all && ca) {
-        all.classList.toggle("on", !settings.ca_only);
-        ca.classList.toggle("on", Boolean(settings.ca_only));
+        all.classList.toggle("on", !settings.float_ca_only);
+        ca.classList.toggle("on", Boolean(settings.float_ca_only));
       }
+      syncGroupButton(floatHost);
       paintList(list, { gmgn: false });
     }
     if (overlayOn() && isFollowPage()) syncStream();
@@ -436,28 +568,43 @@
   function panelShell(title) {
     return `<style>${WechatFeed.cardCss()}
       .wrap { position:relative; display:flex; flex-direction:column; height:100%; min-height:0; overflow:hidden; background:var(--card); color:var(--ink); font:13px/1.5 "Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; box-shadow:0 16px 40px rgba(0,0,0,.28); border:1px solid var(--line); border-radius:14px; }
-      header.bar { display:flex; justify-content:space-between; gap:8px; align-items:center; padding:10px 12px; border-bottom:1px solid var(--line); cursor:move; }
-      header.bar p { margin:2px 0 0; color:var(--muted); font-size:12px; }
-      .mode { display:flex; gap:4px; }
-      .mode button, .bar button { border:1px solid var(--line); border-radius:999px; background:transparent; color:inherit; font:inherit; padding:3px 10px; cursor:pointer; }
+      header.bar { display:flex; gap:8px; align-items:center; padding:6px 8px 6px 10px; border-bottom:1px solid var(--line); cursor:move; }
+      header.bar .brand { display:flex; gap:6px; align-items:center; min-width:0; flex:1; }
+      header.bar .brand svg { flex:none; border-radius:5px; }
+      header.bar strong { font-size:13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+      .mode { display:flex; flex:none; padding:2px; gap:2px; border-radius:999px; background:#f2f4f7; }
+      .mode button, .bar [data-collapse], .bar [data-groups] { height:22px; border:0; border-radius:999px; background:transparent; color:inherit; font:inherit; font-size:12px; padding:0 8px; cursor:pointer; }
+      .bar [data-collapse], .bar [data-groups] { flex:none; border:1px solid var(--line); }
       .mode .on { background:#111827; color:#fff; }
-      .list { overflow:auto; overflow-x:hidden; padding:8px; display:flex; flex-direction:column; align-items:stretch; gap:8px; min-height:0; min-width:0; flex:1 1 auto; }
+      :host([data-theme="dark"]) .mode { background:rgba(255,255,255,.08); }
+      .gpick { position:absolute; top:38px; right:44px; z-index:6; width:min(260px, calc(100% - 16px)); max-height:min(360px, 78%); overflow:auto; background:var(--card); color:var(--ink); border:1px solid var(--line); border-radius:12px; box-shadow:0 12px 32px rgba(0,0,0,.24); padding:8px; }
+      .gpick[hidden] { display:none; }
+      .gpick p { margin:0 0 6px; color:var(--muted); font-size:12px; }
+      .gpick h4 { margin:8px 0 4px; font-size:12px; }
+      .gpick label { display:flex; gap:6px; align-items:center; min-height:26px; font-size:12px; cursor:pointer; }
+      .gpick button { display:block; width:100%; text-align:left; height:28px; margin:0 0 4px; padding:0 8px; border:0; border-radius:8px; background:transparent; color:inherit; font:inherit; cursor:pointer; }
+      .gpick button.on { background:#111827; color:#fff; }
+      .list { overflow:auto; overflow-x:hidden; padding:8px; display:flex; flex-direction:column; align-items:stretch; gap:0; min-height:0; min-width:0; flex:1 1 auto; }
       .chip { border:0; border-radius:999px; background:#111827; color:white; padding:8px 12px; box-shadow:0 8px 24px rgba(0,0,0,.2); cursor:pointer; }
-      .list .wf-xcard { margin:0; }
       .resize { position:absolute; right:4px; bottom:4px; width:18px; height:18px; cursor:nwse-resize; border-right:3px solid #98a2b3; border-bottom:3px solid #98a2b3; opacity:.85; }
     </style>
     <section class="wrap">
-      <header class="bar">
-        <div>
+      <header class="bar" title="点昵称备注此人、点群名备注这个群、点☆星标。拖动此栏可移动窗口。">
+        <div class="brand">
+          ${WechatFeed.logoSvg(20)}
           <strong>${title}</strong>
-          <p>本地信息流，点击昵称备注、点☆星标。</p>
-          <div class="mode">
-            <button type="button" data-all class="on">全部</button>
-            <button type="button" data-ca>只看CA</button>
-          </div>
         </div>
+        <div class="mode">
+          <button type="button" data-all class="on">全部</button>
+          <button type="button" data-ca>只看CA</button>
+        </div>
+        <button type="button" data-groups>群</button>
         <button type="button" data-collapse>收起</button>
       </header>
+      <div class="gpick" hidden>
+        <p class="gpick-title">群聊选择管理</p>
+        <div class="gpick-list"></div>
+      </div>
       <div class="list"><div class="empty">等待群里的新发言。</div></div>
       <div class="resize" data-resize></div>
     </section>`;
@@ -643,6 +790,51 @@
     });
   }
 
+  function syncGroupButton(host) {
+    if (!host || !host._groups) return;
+    const allCount = WechatFeed.feedGroupIds(settings, false).length;
+    const caCount = WechatFeed.feedGroupIds(settings, true).length;
+    host._groups.textContent = allCount || caCount ? `群 ${allCount || "全"}/${caCount || "全"}` : "群";
+    host._groups.title = `全部消息：${allCount ? allCount + " 个群" : "全部监控群"}；只看 CA：${caCount ? caCount + " 个群" : "全部监控群"}`;
+  }
+
+  function fillGroupColumn(list, storedKey, title) {
+    const heading = document.createElement("h4");
+    heading.textContent = title;
+    list.append(heading);
+    const monitored = WechatFeed.monitoredGroupIds(settings);
+    const stored = settings[storedKey] || [];
+    const selected = new Set(WechatFeed.selectedFeedGroups(stored, monitored));
+    const allLabel = document.createElement("label");
+    const allBox = document.createElement("input");
+    allBox.type = "checkbox";
+    allBox.checked = !stored.length;
+    allBox.dataset.feedKey = storedKey;
+    allBox.dataset.group = "";
+    allLabel.append(allBox, document.createTextNode("全选监控群"));
+    list.append(allLabel);
+    for (const item of settings.groups || []) {
+      if ((settings.blocked_groups || []).includes(item.id)) continue;
+      const label = document.createElement("label");
+      const check = document.createElement("input");
+      check.type = "checkbox";
+      check.checked = selected.has(item.id);
+      check.dataset.feedKey = storedKey;
+      check.dataset.group = item.id;
+      label.append(check, document.createTextNode((settings.group_remarks || {})[item.id] || item.name || item.id));
+      list.append(label);
+    }
+  }
+
+  function fillGroupPicker(host) {
+    const box = host && host._gpick;
+    if (!box) return;
+    const list = box.querySelector(".gpick-list");
+    list.replaceChildren();
+    fillGroupColumn(list, "all_feed_groups", "全部消息来源");
+    fillGroupColumn(list, "ca_feed_groups", "只看 CA 来源");
+  }
+
   function wireChrome(host, shadow, { collapse } = {}) {
     const list = shadow.querySelector(".list");
     const all = shadow.querySelector("[data-all]");
@@ -650,18 +842,44 @@
     host._list = list;
     host._all = all;
     host._ca = ca;
+    host._groups = shadow.querySelector("[data-groups]");
+    host._gpick = shadow.querySelector(".gpick");
     bindList(shadow, list);
     all.addEventListener("click", () => {
-      settings.ca_only = false;
+      settings.float_ca_only = false;
+      if (host._gpick) host._gpick.hidden = true;
       paintAll();
-      send("setCaOnly", { enabled: false });
+      send("setSurfaceMode", { surface: "float", enabled: false });
     });
     ca.addEventListener("click", () => {
-      settings.ca_only = true;
+      settings.float_ca_only = true;
+      if (host._gpick) host._gpick.hidden = true;
       paintAll();
-      send("setCaOnly", { enabled: true });
+      send("setSurfaceMode", { surface: "float", enabled: true });
+    });
+    host._groups.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const box = host._gpick;
+      if (!box.hidden) {
+        box.hidden = true;
+        return;
+      }
+      fillGroupPicker(host);
+      box.hidden = false;
+    });
+    host._gpick.addEventListener("change", (event) => {
+      const box = event.target.closest("input[data-feed-key]");
+      if (!box) return;
+      const key = box.dataset.feedKey;
+      const monitored = WechatFeed.monitoredGroupIds(settings);
+      const next = WechatFeed.nextFeedGroups(settings[key] || [], box.dataset.group || "", monitored);
+      settings[key] = next;
+      fillGroupPicker(host);
+      paintAll();
+      send("setFeedGroups", { caOnly: key === "ca_feed_groups", groups: next });
     });
     shadow.querySelector("[data-collapse]").addEventListener("click", collapse);
+    syncGroupButton(host);
     paintList(list, { gmgn: false });
   }
 
@@ -672,7 +890,7 @@
     applyTheme(floatHost);
     applyRect(floatHost, rect);
     const shadow = floatHost.attachShadow({ mode: "closed" });
-    shadow.innerHTML = panelShell("微信群");
+    shadow.innerHTML = panelShell("技术瓜群流");
     const persist = () => saveRect(currentRect(floatHost));
     enableDrag(floatHost, shadow.querySelector("header.bar"), persist);
     enableResize(floatHost, shadow.querySelector("[data-resize]"), persist);
@@ -691,8 +909,8 @@
     floatHost = document.createElement("div");
     floatHost.style.cssText = "display:block;position:fixed;right:16px;bottom:16px;z-index:2147483646;";
     const shadow = floatHost.attachShadow({ mode: "closed" });
-    shadow.innerHTML = `<style>${WechatFeed.cardCss()}</style><button class="chip" type="button">微信群</button>
-      <style>.chip{border:0;border-radius:999px;background:#111827;color:#fff;padding:8px 12px;box-shadow:0 8px 24px rgba(0,0,0,.2);cursor:pointer;font:13px/1.4 sans-serif;}</style>`;
+    shadow.innerHTML = `<style>${WechatFeed.cardCss()}</style><button class="chip" type="button">${WechatFeed.logoSvg(18)}技术瓜群流</button>
+      <style>.chip{display:inline-flex;align-items:center;gap:6px;border:0;border-radius:999px;background:#111827;color:#fff;padding:6px 12px 6px 6px;box-shadow:0 8px 24px rgba(0,0,0,.2);cursor:pointer;font:13px/1.4 sans-serif;}.chip svg{flex:none;border-radius:6px;}</style>`;
     shadow.querySelector("button").addEventListener("click", () => {
       collapsed = false;
       removeFloat();
@@ -726,7 +944,6 @@
     const starred = new Set(settings.starred_users || []);
     return [
       card.id,
-      watermark,
       starred.has(card.senderUsername) ? 1 : 0,
       (settings.star_colors || {})[card.senderUsername] || "",
       (settings.user_remarks || {})[card.senderUsername] || "",
@@ -740,9 +957,9 @@
   function dialogRoot() {
     if (dialogHost && dialogHost.isConnected) return dialogHost._shadow;
     dialogHost = document.createElement("div");
-    dialogHost.style.cssText = "position:fixed;left:0;top:0;width:0;height:0;z-index:2147483647;";
+    dialogHost.style.cssText = "position:fixed;inset:0;z-index:2147483647;pointer-events:none;";
     const shadow = dialogHost.attachShadow({ mode: "closed" });
-    shadow.innerHTML = "<style>.wf-ask{position:fixed !important;}</style>";
+    shadow.innerHTML = "<style>.wf-ask{position:fixed !important;inset:0 !important;pointer-events:auto;}</style>";
     dialogHost._shadow = shadow;
     document.documentElement.append(dialogHost);
     return shadow;
@@ -771,8 +988,7 @@
     host.style.cssText = "display:block;";
     const shadow = host.attachShadow({ mode: "closed" });
     shadow.innerHTML = `<style>${WechatFeed.cardCss()}
-      .list { display:flex; flex-direction:column; gap:8px; padding:8px 8px 0; }
-      .wf-xcard { margin:0; }
+      .list { display:flex; flex-direction:column; gap:0; padding:8px 8px 0; }
     </style><div class="list"></div>`;
     host._list = shadow.querySelector(".list");
     bindList(shadow, host._list, { askRoot: dialogRoot });
@@ -786,7 +1002,7 @@
     const stamp = rows.map((card) => cardStamp(card)).join("|");
     if (host._stamp === stamp) return;
     host._stamp = stamp;
-    host._list.innerHTML = rows.map((card) => WechatFeed.gmgnCardHtml(present(card))).join("");
+    host._list.innerHTML = rows.map((card, index) => WechatFeed.gmgnCardHtml(present(card), WechatFeed.stackMeta(rows, index))).join("");
     hydrate(host._list);
   }
 
@@ -801,7 +1017,7 @@
     if (!overlayOn() || !isFollowPage() || typeof WechatFeed === "undefined") return;
     const itemList = streamList && streamList.isConnected ? streamList : findTweetItemList();
     if (!itemList) return;
-    const rows = visibleCards();
+    const rows = visibleCards(settings.gmgn_ca_only);
     const theme = isDarkPage() ? "dark" : "light";
     for (const item of itemList.querySelectorAll(":scope > [data-index]")) {
       const picked = slotCards(rows, item);
@@ -891,17 +1107,25 @@
   }
 
   function connect() {
-    if (port) return;
-    port = chrome.runtime.connect({ name: "gmgn-feed" });
+    if (port || !extensionAlive()) return;
+    try {
+      port = chrome.runtime.connect({ name: "gmgn-feed" });
+    } catch (error) {
+      port = null;
+      return;
+    }
     port.onMessage.addListener((message) => {
       if (message.type === "settings" && message.settings) {
-        const caChanged = Boolean(settings.ca_only) !== Boolean(message.settings.ca_only);
         const overlayChanged = Boolean(settings.gmgn_overlay) !== Boolean(message.settings.gmgn_overlay);
         const floatChanged = Boolean(settings.float_panel) !== Boolean(message.settings.float_panel);
+        const listenChanged =
+          JSON.stringify(settings.group_users || {}) !== JSON.stringify(message.settings.group_users || {})
+          || JSON.stringify(settings.blocked_users || []) !== JSON.stringify(message.settings.blocked_users || []);
         settings = { ...settings, ...message.settings };
+        if (typeof WechatFeed !== "undefined") WechatFeed.setNumberFormat(settings.mcap_format);
         if (overlayChanged || floatChanged) applySurface();
         else paintAll();
-        if (caChanged) requestSnapshot(false);
+        if (listenChanged) requestSnapshot(false);
       }
       if (message.type === "snapshot") {
         snapshotPending = false;
@@ -920,6 +1144,7 @@
     port.onDisconnect.addListener(() => {
       port = null;
       snapshotPending = false;
+      if (!extensionAlive()) return;
       if (floatWanted() || (overlayOn() && isGmgn())) {
         if (reconnectTimer) clearTimeout(reconnectTimer);
         reconnectTimer = setTimeout(connect, 800);
@@ -933,7 +1158,11 @@
       clearTimeout(reconnectTimer);
       reconnectTimer = 0;
     }
-    if (port) port.disconnect();
+    try {
+      if (port) port.disconnect();
+    } catch (error) {
+      // 插件重载后旧端口已经失效
+    }
     port = null;
   }
 
@@ -971,18 +1200,17 @@
     if (stored.floatPanel !== undefined) settings.float_panel = Boolean(stored.floatPanel);
     if (stored.caOnly !== undefined) settings.ca_only = Boolean(stored.caOnly);
     if (Array.isArray(stored.floatSites)) floatSites = stored.floatSites;
-    if (typeof stored.watermark === "string") watermark = stored.watermark;
+    if (typeof WechatFeed !== "undefined") WechatFeed.setNumberFormat(settings.mcap_format);
   }
 
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area !== "local") return;
+    if (!extensionAlive() || area !== "local") return;
     const stored = {};
     if (changes.settings) stored.settings = changes.settings.newValue;
     if (changes.gmgnOverlay) stored.gmgnOverlay = changes.gmgnOverlay.newValue;
     if (changes.floatPanel) stored.floatPanel = changes.floatPanel.newValue;
     if (changes.caOnly) stored.caOnly = changes.caOnly.newValue;
     if (changes.floatSites) stored.floatSites = changes.floatSites.newValue || DEFAULT_FLOAT_SITES;
-    if (changes.watermark) stored.watermark = changes.watermark.newValue || "";
     if (!Object.keys(stored).length) return;
     const prevOverlay = overlayOn();
     const prevFloat = floatWanted();
@@ -996,7 +1224,7 @@
 
   async function boot() {
     try {
-      const stored = await chrome.storage.local.get(["gmgnOverlay", "floatPanel", "caOnly", "settings", "floatSites", "watermark"]);
+      const stored = await chrome.storage.local.get(["gmgnOverlay", "floatPanel", "caOnly", "settings", "floatSites"]);
       applyStored(stored);
       applySurface();
     } catch (error) {
@@ -1011,13 +1239,14 @@
         float_panel: state.float_panel,
         ca_only: state.ca_only,
       };
+      if (typeof WechatFeed !== "undefined") WechatFeed.setNumberFormat(settings.mcap_format);
       applySurface();
     }
   }
 
   // 单页应用切换路由不会重新注入脚本，网址变了要重新判断白名单。
   setInterval(() => {
-    if (location.href === lastHref) return;
+    if (!extensionAlive() || location.href === lastHref) return;
     lastHref = location.href;
     applySurface();
   }, 1000);
