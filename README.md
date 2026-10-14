@@ -17,9 +17,9 @@
 
 ### 2. WeChatDataAnalysis（WDA）是干什么的
 
-本项目**不包含、不修改** WDA。微信 4.x 的本地库是加密的，本服务自己解不开。
+本项目**不拷贝 WDA 源码**。需要 WDA 时到它的 GitHub 自行下载开源版。说明见 [docs/wda.md](docs/wda.md)。
 
-第一次启动时，你需要先打开开源版 [WeChatDataAnalysis](https://github.com/LifeArchiveProject/WeChatDataAnalysis)，按它的提示完成解密并保持开着。本服务会向 WDA 的本机接口要一次库密钥（以及图片密钥），写进 `data/direct.json`。`wechat-feed.cmd status` 显示数据来源为 `direct` 之后，就可以把 WDA 关掉。之后本服务自己只读打开微信库，不再依赖 WDA。
+微信 4.x 的本地库是加密的。第一次打开开源版 [WeChatDataAnalysis](https://github.com/LifeArchiveProject/WeChatDataAnalysis)，按它的提示完成解密并保持开着。本服务向 WDA 的本机接口要一次库密钥（以及图片密钥），写进 `data/direct.json`。`wechat-feed.cmd status` 显示数据来源为 `direct` 之后，就可以把 WDA 关掉。之后用本项目自己的轻量只读逻辑盯微信库，不再依赖 WDA。
 
 请用开源版，不要用文件名以 `advanced-` 开头的高级版。本仓库不会附带 WDA 安装包，请到它自己的 GitHub 下载。
 
