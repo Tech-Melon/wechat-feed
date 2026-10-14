@@ -924,6 +924,12 @@ def test_direct_emoji_sticker_and_system_emote() -> None:
     assert png is not None and png[1] == "wl.png"
     gif = emote_source("冷汗")
     assert gif is not None and gif[1] == "17.gif"
+    assert emote_source("微笑")[1] == "0.gif"
+    assert emote_source("强")[1] == "79.gif"
+    assert emote_source("弱")[1] == "80.gif"
+    assert emote_source("OK")[1] == "89.gif"
+    assert emote_source("磕头")[1] == "96.gif"
+    assert emote_source("跳绳")[1] == "98.gif"
     assert emote_source("不是表情") is None
 
 
