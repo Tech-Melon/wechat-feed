@@ -529,6 +529,15 @@
     });
   }
 
+  function tokenStamp(card) {
+    return (card.tokenCards || [])
+      .map(
+        (token) =>
+          `${token.source || ""}:${token.marketCap || 0}:${token.liquidity || 0}:${token.holders || 0}`
+      )
+      .join(",");
+  }
+
   function paintList(list, { gmgn, limit } = {}) {
     if (!list || typeof WechatFeed === "undefined") return;
     const rows = visibleCards(settings.float_ca_only);
@@ -541,7 +550,7 @@
       ? WechatFeed.numberFormat()
       : (settings.mcap_format || "cn");
     const stamp = `${fmt}|` + shown
-      .map((card) => `${card.id}:${starred.has(card.senderUsername) ? 1 : 0}:${(settings.star_colors || {})[card.senderUsername] || ""}:${userRemarks[card.senderUsername] || ""}:${groupRemarks[card.conversationId] || ""}:${(card.tokenCards || []).length}`)
+      .map((card) => `${card.id}:${starred.has(card.senderUsername) ? 1 : 0}:${(settings.star_colors || {})[card.senderUsername] || ""}:${userRemarks[card.senderUsername] || ""}:${groupRemarks[card.conversationId] || ""}:${tokenStamp(card)}`)
       .join("|");
     if (list.dataset.wfStamp === stamp) return;
     list.dataset.wfStamp = stamp;
@@ -952,7 +961,7 @@
       (settings.user_remarks || {})[card.senderUsername] || "",
       (settings.group_remarks || {})[card.conversationId] || "",
       card.text || "",
-      (card.tokenCards || []).length,
+      tokenStamp(card),
       (card.contextBefore || []).length + (card.contextAfter || []).length,
     ].join(":");
   }

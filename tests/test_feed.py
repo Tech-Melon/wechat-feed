@@ -15,6 +15,8 @@ from wechat_feed.normalize import extract_groups, normalize_message_event
 from wechat_feed.store import CardStore
 from wechat_feed.tokens import (
     _from_pair,
+    _from_search,
+    _search_covers_card,
     allowed_chainicon_url,
     candidate_chains,
     chain_from_search,
@@ -146,7 +148,7 @@ def test_public_docs_cover_wda_and_unpacked_extension() -> None:
     guide = (ROOT / "docs" / "使用指南.md").read_text(encoding="utf-8")
     assert "不在监控群的不入库" in guide
     assert "只过滤显示" in guide
-    assert "补 search" in guide
+    assert "并行打 GMGN search" in guide
 
 
 def test_api_defaults_and_two_paths(client: TestClient) -> None:
@@ -307,6 +309,21 @@ def test_candidate_chains_prefers_dex_then_kind() -> None:
     assert coins == []
     assert wallets[0]["chain"] == "eth"
     assert chain_from_search({"coins": [{"address": decoy, "chain": "base"}]}, evm) == ""
+    covered = _from_search(
+        {
+            "address": evm,
+            "chain": "robinhood",
+            "symbol": "MJ",
+            "mcp": "27749.795",
+            "liquidity": "12343",
+            "holder_count": 135,
+            "is_honeypot": False,
+        },
+        evm,
+    )
+    assert covered["marketCap"] == 27749.795
+    assert _search_covers_card(covered)
+    assert not _search_covers_card(_from_search({"chain": "bsc", "symbol": "X"}, evm))
 
 
 def test_card_store_round_trip(tmp_path: Path) -> None:
@@ -1070,6 +1087,8 @@ def test_package_omits_local_data_and_api_key() -> None:
     assert "img.dataset.wfFull" in content_js
     assert "shouldFillMore" in content_js
     assert "FILL_VISIBLE" in content_js
+    assert "function tokenStamp" in content_js
+    assert "token.marketCap" in content_js
     assert "微信群" not in feed
     assert "wf-origin-inline" not in feed
     assert 'class="wf-badge"' not in feed

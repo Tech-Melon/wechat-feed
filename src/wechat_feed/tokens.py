@@ -516,7 +516,9 @@ def _from_search(row: dict[str, Any], address: str) -> dict[str, Any]:
     chain = gmgn_api_chain(str(row.get("chain") or row.get("network") or ""))
     price = _num(row.get("price"))
     liquidity = _num(row.get("liquidity"))
-    market_cap = _num(row.get("market_cap") or row.get("usd_market_cap"))
+    market_cap = _num(
+        row.get("market_cap") or row.get("usd_market_cap") or row.get("mcp")
+    )
     holders = int(_num(row.get("holder_count")))
     created = int(
         _num(row.get("created_at") or row.get("creation_timestamp") or row.get("open_timestamp"))
@@ -529,6 +531,12 @@ def _from_search(row: dict[str, Any], address: str) -> dict[str, Any]:
     else:
         honeypot_text = str(honeypot or "")
     logo = str(row.get("logo") or "").strip()
+    link = row.get("token_link") if isinstance(row.get("token_link"), dict) else {}
+    twitter = str(
+        row.get("twitter") or row.get("twitter_username") or link.get("twitter_username") or ""
+    ).strip()
+    website = str(row.get("website") or link.get("website") or "").strip()
+    telegram = str(row.get("telegram") or link.get("telegram") or "").strip()
     return {
         "address": address,
         "chain": chain,
@@ -540,9 +548,9 @@ def _from_search(row: dict[str, Any], address: str) -> dict[str, Any]:
         "priceUsd": str(row.get("price") or "") if price else "",
         "url": gmgn_token_url(chain or "bsc", address),
         "source": "gmgn-search",
-        "twitter": str(row.get("twitter") or row.get("twitter_username") or "").strip(),
-        "website": str(row.get("website") or "").strip(),
-        "telegram": str(row.get("telegram") or "").strip(),
+        "twitter": twitter,
+        "website": website,
+        "telegram": telegram,
         "buyTax": format_tax(row.get("buy_tax")) if row.get("buy_tax") not in (None, "") else "",
         "sellTax": format_tax(row.get("sell_tax")) if row.get("sell_tax") not in (None, "") else "",
         "honeypot": honeypot_text,
@@ -648,8 +656,19 @@ _GMGN_WEIGHTS = {
     "/v1/token/traders": 5,
     "/v1/market/search": 1,
 }
-_CACHE_TTL = 300.0
+_CACHE_TTL = 60.0
 _CACHE_MAX = 2000
+
+
+def _search_covers_card(token: dict[str, Any] | None) -> bool:
+    """search 已有链、代号和市值时，不再打 token/info。"""
+    if not token:
+        return False
+    if not str(token.get("chain") or "").strip():
+        return False
+    if not str(token.get("symbol") or "").strip():
+        return False
+    return _num(token.get("marketCap")) > 0
 
 
 def _plan_weight() -> int:
@@ -745,15 +764,7 @@ class TokenIndex:
         async with self._lock:
             cached = self._cache.get(cache_key)
             if cached and time.time() - cached[0] < _CACHE_TTL:
-                value = cached[1]
-                source = str((value or {}).get("source") or "") if value else ""
-                stale_dex = (
-                    source == "dexscreener"
-                    and time.time() - cached[0] >= 30
-                    and time.time() >= self._gmgn_cooldown
-                )
-                if not stale_dex:
-                    return value
+                return cached[1]
         looked = await self._fetch(
             address,
             str(item.get("chain") or ""),
@@ -831,17 +842,22 @@ class TokenIndex:
             extra["chain"] = gmgn_api_chain(chain)
         return await self._gmgn_call("/v1/market/search", extra)
 
-    async def _search_hits(self, address: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        payload = await self._gmgn_search(address)
-        if payload is None:
-            return [], []
-        coins, wallets = parse_search(payload, address)
-        if coins or wallets or _kind_of(address) != "evm":
-            return coins, wallets
-        gathered = await asyncio.gather(
-            *[self._gmgn_search(address, chain) for chain in _EVM_SEARCH_CHAINS],
-            return_exceptions=True,
-        )
+    async def _search_hits(
+        self, address: str, hint: str = ""
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        hint_norm = _norm_chain(hint)
+        if hint_norm:
+            queries = [self._gmgn_search(address, hint_norm)]
+        elif _kind_of(address) == "evm":
+            queries = [
+                self._gmgn_search(address),
+                *[self._gmgn_search(address, chain) for chain in _EVM_SEARCH_CHAINS],
+            ]
+        else:
+            queries = [self._gmgn_search(address)]
+        gathered = await asyncio.gather(*queries, return_exceptions=True)
+        coins: list[dict[str, Any]] = []
+        wallets: list[dict[str, Any]] = []
         seen_coins: set[tuple[str, str]] = set()
         seen_wallets: set[tuple[str, str]] = set()
         for item in gathered:
@@ -869,11 +885,13 @@ class TokenIndex:
         return coins, wallets
 
     async def _gmgn_pair(self, chain: str, address: str) -> dict[str, Any] | None:
-        info = await self._gmgn_get("/v1/token/info", chain, address)
-        if not info or not (info.get("symbol") or info.get("address")):
+        info, security = await asyncio.gather(
+            self._gmgn_get("/v1/token/info", chain, address),
+            self._gmgn_get("/v1/token/security", chain, address),
+        )
+        if not isinstance(info, dict) or not (info.get("symbol") or info.get("address")):
             return None
-        security = await self._gmgn_get("/v1/token/security", chain, address)
-        return _from_gmgn(info, security, chain, address)
+        return _from_gmgn(info, security if isinstance(security, dict) else None, chain, address)
 
     async def _dexscreener(self, address: str, hint: str) -> dict[str, Any] | None:
         url = f"https://api.dexscreener.com/latest/dex/tokens/{address}"
@@ -909,7 +927,7 @@ class TokenIndex:
         self,
         address: str,
         hint: str,
-        resolved: bool,
+        resolved: bool,  # 保留入参，定链改走 search
         on_partial: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any] | None:
         hint_norm = _norm_chain(hint)
@@ -917,17 +935,20 @@ class TokenIndex:
         async def enrich(chain: str, seed: dict[str, Any] | None) -> dict[str, Any] | None:
             if seed and on_partial:
                 on_partial(seed)
+            if seed and _search_covers_card(seed):
+                return seed
             if not chain:
                 return seed
             gmgn = await self._gmgn_pair(chain, address)
+            if gmgn and seed:
+                if not gmgn.get("marketCap") and seed.get("marketCap"):
+                    gmgn["marketCap"] = seed["marketCap"]
+                    gmgn["marketCapText"] = seed.get("marketCapText") or format_mcap(
+                        float(seed["marketCap"] or 0)
+                    )
             return gmgn or seed
 
-        if resolved and hint_norm:
-            gmgn = await self._gmgn_pair(hint_norm, address)
-            if gmgn:
-                return gmgn
-
-        coins, wallets = await self._search_hits(address)
+        coins, wallets = await self._search_hits(address, hint_norm)
         if coins:
             coin = _best_coin(coins)
             chain = gmgn_api_chain(str(coin.get("chain") or coin.get("network") or hint_norm))
