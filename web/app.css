@@ -293,6 +293,10 @@ body {
   font-size: 13px;
 }
 
+.member-row[hidden] {
+  display: none;
+}
+
 .member-row img {
   width: 22px;
   height: 22px;

@@ -234,6 +234,10 @@ section { padding: 10px 14px 4px; }
   font-size: 12px;
 }
 
+.member-row[hidden] {
+  display: none;
+}
+
 .member-row img {
   width: 18px;
   height: 18px;

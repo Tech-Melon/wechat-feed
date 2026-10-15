@@ -1113,6 +1113,15 @@ def test_package_omits_local_data_and_api_key() -> None:
     app_js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
     assert "await reloadFeeds()" in app_js
     assert "function setListenUsers" in app_js
+    css = (ROOT / "web" / "app.css").read_text(encoding="utf-8")
+    assert ".member-row[hidden]" in css
+    assert 'headers={"Cache-Control": "no-store"}' in (
+        ROOT / "src" / "wechat_feed" / "server.py"
+    ).read_text(encoding="utf-8")
+    popup_js = (ROOT / "extension" / "popup.js").read_text(encoding="utf-8")
+    assert "getManifest().version" in popup_js
+    popup_css = (ROOT / "extension" / "popup.css").read_text(encoding="utf-8")
+    assert ".member-row[hidden]" in popup_css
     assert "dataset.hay" in app_js
     assert "function applyListen" in (ROOT / "extension" / "popup.js").read_text(encoding="utf-8")
     assert "writeTail" in background

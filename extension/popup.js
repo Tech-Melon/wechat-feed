@@ -561,5 +561,6 @@ document.querySelector("#voice-tab").addEventListener("click", (event) => {
 });
 
 document.querySelector("#open").addEventListener("click", () => {
-  chrome.tabs.create({ url: "http://127.0.0.1:8765/" });
+  const ver = chrome.runtime.getManifest().version;
+  chrome.tabs.create({ url: `http://127.0.0.1:8765/?v=${encodeURIComponent(ver)}` });
 });

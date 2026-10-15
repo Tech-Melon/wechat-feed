@@ -571,11 +571,18 @@ def create_app() -> FastAPI:
 
     @app.get("/")
     def index() -> FileResponse:
-        return FileResponse(root / "web" / "index.html")
+        return FileResponse(
+            root / "web" / "index.html",
+            headers={"Cache-Control": "no-store"},
+        )
 
     @app.get("/shared/feed.js")
     def shared_feed() -> FileResponse:
-        return FileResponse(root / "extension" / "feed.js", media_type="text/javascript")
+        return FileResponse(
+            root / "extension" / "feed.js",
+            media_type="text/javascript",
+            headers={"Cache-Control": "no-store"},
+        )
 
     app.mount("/assets", StaticFiles(directory=root / "web"), name="assets")
     return app
