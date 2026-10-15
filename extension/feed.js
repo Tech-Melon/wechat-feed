@@ -253,21 +253,27 @@
 
   // 规避分隔符只在 URL 片段里还原成 `.` / `:` / `/`，避免「这一点」误伤。
   const URL_DOT = String.raw`[.\u00B7\u2024\u2027\u30FB\uFF0E\u3002点點丶‧]`;
+  const URL_GAP = String.raw`[\s\u00A0\u200B-\u200D\uFEFF\u3000]*`;
   const URL_TLD = String.raw`(?:finance|online|website|exchange|market|space|store|cloud|tech|info|site|shop|blog|wiki|live|news|link|page|meme|cash|swap|nft|dao|fun|app|xyz|pro|dev|net|org|com|top|vip|club|biz|icu|wang|xin|gov|edu|mil|int|near|sol|eth|ton|defi|io|ai|cc|me|co|gg|cn|hk|tv|to|so|fi|uk|us)`;
-  const URL_SCHEME = String.raw`(?:https?|hxxps?)[:：][/／]{0,2}`;
-  const URL_BODY = String.raw`[A-Za-z0-9\-._~:/?#@!$&*+,;=%|点點。．·・丶‧／：\[\]()（）【】]+`;
+  const URL_SCHEME = String.raw`(?:https?|hxxps?)[:：]${URL_GAP}[/／]{0,2}`;
+  const URL_BODY = String.raw`[A-Za-z0-9\-._~:/?#@!$&*+,;=%|点點。．·・丶‧／：\[\]()（）【】]*`;
   const URL_LABEL = String.raw`[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?`;
-  const URL_PATH = String.raw`(?:[/／#?]${URL_BODY})?`;
-  const URL_PATTERN = String.raw`(?:(?<![@A-Za-z0-9])${URL_SCHEME}${URL_BODY})|(?:(?<![@A-Za-z0-9])${URL_LABEL}(?:${URL_DOT}${URL_LABEL})*${URL_DOT}${URL_TLD}\b${URL_PATH})`;
+  const URL_HOST = String.raw`${URL_LABEL}(?:${URL_GAP}${URL_DOT}${URL_GAP}${URL_LABEL})*${URL_GAP}${URL_DOT}${URL_GAP}${URL_TLD}`;
+  const URL_PATH = String.raw`(?:[/／?#]${URL_BODY})?`;
+  const URL_PATTERN = String.raw`(?:(?<![@A-Za-z0-9])${URL_SCHEME}${URL_GAP}(?:${URL_DOT}${URL_GAP})*${URL_HOST}${URL_PATH})|(?:(?<![@A-Za-z0-9])${URL_LABEL}(?:${URL_DOT}${URL_LABEL})*${URL_DOT}${URL_TLD}\b${URL_PATH})`;
   const URL_TRAIL = /[),.;:!?，。、；：！？》>】\]"'`]+$/;
 
   function restoreHref(raw) {
     let text = String(raw || "").trim();
     if (!text) return "";
+    text = text.replace(/[\u200B-\u200D\uFEFF]/g, "");
     text = text.replace(/\[\s*\.\s*\]|\(\s*\.\s*\)|（\s*\.\s*）|【\s*\.\s*】/g, ".");
     text = text.replace(/^hxxps/i, "https").replace(/^hxxp/i, "http");
-    text = text.replace(/^(https?)[:：][/／]*/i, "$1://");
+    text = text.replace(/^(https?)[:：][\s\u00A0\u3000]*[/／]*/i, "$1://");
     text = text.replace(/[点點。．·・丶‧]/g, ".");
+    text = text.replace(/[\s\u00A0\u3000]*\.[\s\u00A0\u3000]*/g, ".");
+    text = text.replace(/^(https?:\/\/)[\s\u00A0\u3000]+/i, "$1");
+    text = text.replace(/^(https?:\/\/)\.+/i, "$1");
     text = text.replace(/／/g, "/");
     text = text.replace(/：/g, ":");
     if (!/^[a-z][a-z0-9+.-]*:/i.test(text)) text = `https://${text}`;

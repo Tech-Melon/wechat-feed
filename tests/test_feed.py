@@ -1115,6 +1115,9 @@ def test_package_omits_local_data_and_api_key() -> None:
     assert "wf-text-link" in feed
     assert "点點" in feed
     assert "hxxp" in feed
+    assert "URL_GAP" in feed
+    assert "URL_HOST" in feed
+    assert r"^(https?:\/\/)\.+" in feed
     assert "wf-chain-ico" in feed
     assert "/api/chainicon?n=" in feed
     assert "google.com/s2/favicons" not in feed
