@@ -1105,6 +1105,11 @@ def test_package_omits_local_data_and_api_key() -> None:
     assert "wf-tag-ico" in feed
     background = (ROOT / "extension" / "background.js").read_text(encoding="utf-8")
     assert "include_all_groups" in background
+    assert "AVATAR_TTL_MS" in background
+    assert "wf-avatar-v2" in background
+    server = (ROOT / "src" / "wechat_feed" / "server.py").read_text(encoding="utf-8")
+    assert "_AVATAR_TTL = 24 * 3600" in server
+    assert "max-age=86400" in server
     app_js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
     assert "await reloadFeeds()" in app_js
     assert "wf-text-link" in feed

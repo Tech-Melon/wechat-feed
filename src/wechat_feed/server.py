@@ -47,7 +47,8 @@ from .wxemoji import (
 from .wximage import load_image, parse_ref, ref_for
 
 _AVATAR_USER = re.compile(r"^[A-Za-z0-9_@.\-]{1,80}$")
-_AVATAR_TTL = 7 * 24 * 3600
+_AVATAR_TTL = 24 * 3600
+_AVATAR_CACHE = "private, max-age=86400"
 
 _LISTEN_HOST = "127.0.0.1"
 _LISTEN_PORT = 8765
@@ -240,15 +241,22 @@ def create_app() -> FastAPI:
         if not _AVATAR_USER.match(ident):
             raise HTTPException(status_code=400, detail="用户名不合法")
         blob_path, mime_path = _avatar_files(ident)
-        if blob_path.exists() and time.time() - blob_path.stat().st_mtime < _AVATAR_TTL:
+
+        def cached_response() -> Response | None:
+            if not blob_path.exists():
+                return None
             media_type = "image/jpeg"
             if mime_path.exists():
                 media_type = mime_path.read_text(encoding="utf-8").strip() or media_type
             return Response(
                 content=blob_path.read_bytes(),
                 media_type=media_type,
-                headers={"Cache-Control": "private, max-age=604800, immutable"},
+                headers={"Cache-Control": _AVATAR_CACHE},
             )
+
+        cached = cached_response()
+        if cached and time.time() - blob_path.stat().st_mtime < _AVATAR_TTL:
+            return cached
         settings = store.get()
         reader = await direct.reader(str(settings["upstream_base"]))
         if reader is not None:
@@ -264,7 +272,7 @@ def create_app() -> FastAPI:
                 return Response(
                     content=blob,
                     media_type=media_type,
-                    headers={"Cache-Control": "private, max-age=604800, immutable"},
+                    headers={"Cache-Control": _AVATAR_CACHE},
                 )
         url = f"{settings['upstream_base']}/api/chat/avatar"
         try:
@@ -272,17 +280,21 @@ def create_app() -> FastAPI:
                 url, params={"username": ident, "source": "auto"}, timeout=8.0
             )
         except Exception as exc:
+            if cached is not None:
+                return cached
             logger.info("头像读取失败: {}", type(exc).__name__)
             raise HTTPException(status_code=502, detail="头像读不到") from exc
         content_type = str(response.headers.get("content-type") or "")
         if response.status_code != 200 or not content_type.startswith("image/"):
+            if cached is not None:
+                return cached
             raise HTTPException(status_code=404, detail="没有头像")
         blob_path.write_bytes(response.content)
         mime_path.write_text(content_type, encoding="utf-8")
         return Response(
             content=response.content,
             media_type=content_type,
-            headers={"Cache-Control": "private, max-age=604800, immutable"},
+            headers={"Cache-Control": _AVATAR_CACHE},
         )
 
     async def local_media(query: str) -> Response | None:

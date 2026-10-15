@@ -244,22 +244,32 @@ function blobToDataUrl(blob) {
 }
 
 const avatarMem = new Map();
+const AVATAR_TTL_MS = 24 * 3600 * 1000;
 
 async function proxyCached(url) {
-  if (avatarMem.has(url)) return avatarMem.get(url);
-  const cache = await caches.open("wf-avatar-v1");
+  const mem = avatarMem.get(url);
+  if (mem && Date.now() - mem.at < AVATAR_TTL_MS) return mem.dataUrl;
+  const cache = await caches.open("wf-avatar-v2");
   let response = await cache.match(url);
-  if (!response) {
-    response = await fetch(url);
-    if (!response.ok) throw new Error("proxy");
-    const cacheControl = String(response.headers.get("Cache-Control") || "");
-    if (!cacheControl.includes("no-store")) {
-      await cache.put(url, response.clone());
+  const cachedAt = Number(response?.headers.get("X-Wf-Cached-At") || 0);
+  if (!response || Date.now() - cachedAt >= AVATAR_TTL_MS) {
+    try {
+      const fresh = await fetch(url, { cache: "no-store" });
+      if (!fresh.ok) throw new Error("proxy");
+      const headers = new Headers(fresh.headers);
+      headers.set("X-Wf-Cached-At", String(Date.now()));
+      const stored = new Response(await fresh.clone().blob(), {
+        status: fresh.status,
+        headers,
+      });
+      await cache.put(url, stored.clone());
+      response = stored;
+    } catch (error) {
+      if (!response) throw error;
     }
   }
   const dataUrl = await blobToDataUrl(await response.blob());
-  const cacheControl = String(response.headers.get("Cache-Control") || "");
-  if (!cacheControl.includes("no-store")) avatarMem.set(url, dataUrl);
+  avatarMem.set(url, { dataUrl, at: Date.now() });
   return dataUrl;
 }
 
