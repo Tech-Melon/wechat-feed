@@ -1112,6 +1112,10 @@ def test_package_omits_local_data_and_api_key() -> None:
     assert "max-age=86400" in server
     app_js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
     assert "await reloadFeeds()" in app_js
+    assert "function setListenUsers" in app_js
+    assert "dataset.hay" in app_js
+    assert "function applyListen" in (ROOT / "extension" / "popup.js").read_text(encoding="utf-8")
+    assert "writeTail" in background
     assert "wf-text-link" in feed
     assert "点點" in feed
     assert "hxxp" in feed

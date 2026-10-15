@@ -160,6 +160,8 @@ function renderSurfaceModes() {
 const expandedGroups = new Set();
 const memberCache = new Map();
 const memberQuery = new Map();
+let groupUsersTimer = 0;
+let groupUsersDirty = false;
 
 async function ensureMembers(groupId) {
   const cached = memberCache.get(groupId);
@@ -170,17 +172,36 @@ async function ensureMembers(groupId) {
   return members;
 }
 
-async function saveGroupUsers(groupId, users) {
+function setListenUsers(groupId, users) {
   const map = { ...(state.settings.group_users || {}) };
   if (users === null) delete map[groupId];
   else map[groupId] = users;
-  await saveSettings({ group_users: map }, { skipFeed: true });
+  state.settings.group_users = map;
+  groupUsersDirty = true;
   renderGroups();
   renderFeed();
+  clearTimeout(groupUsersTimer);
+  groupUsersTimer = setTimeout(() => {
+    flushGroupUsers().catch((error) => setNotice(error.message));
+  }, 280);
+}
+
+async function flushGroupUsers() {
+  const map = { ...(state.settings.group_users || {}) };
+  await saveSettings({ group_users: map }, { skipFeed: true });
+  groupUsersDirty = false;
   state.feeds.all = emptyFeedCache();
   state.feeds.ca = emptyFeedCache();
   await loadFeed({ reset: true });
   loadFeed({ reset: true, caOnly: !state.settings.ca_only }).catch(() => {});
+}
+
+function memberHaystack(member) {
+  const remark = (state.settings.user_remarks || {})[member.id] || "";
+  return [member.name, member.id, member.roomNick, member.remark, member.nick, remark]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
 }
 
 function renderMemberPanel(panel, groupId, members) {
@@ -198,10 +219,10 @@ function renderMemberPanel(panel, groupId, members) {
   partBtn.textContent = "只听部分";
   partBtn.classList.toggle("on", partial);
   allBtn.addEventListener("click", () => {
-    saveGroupUsers(groupId, null).catch((error) => setNotice(error.message));
+    setListenUsers(groupId, null);
   });
   partBtn.addEventListener("click", () => {
-    saveGroupUsers(groupId, users || []).catch((error) => setNotice(error.message));
+    setListenUsers(groupId, users || []);
   });
   mode.append(allBtn, partBtn);
   panel.append(mode);
@@ -232,18 +253,19 @@ function renderMemberPanel(panel, groupId, members) {
     const row = document.createElement("div");
     row.className = "member-row";
     row.dataset.id = member.id;
-    row.dataset.name = member.name || "";
-    const hit = String(member.name || "").toLowerCase().includes(needle) || member.id.toLowerCase().includes(needle);
+    row.dataset.hay = memberHaystack(member);
+    const hit = (row.dataset.hay || "").includes(needle);
     row.hidden = Boolean(needle) && !hit;
     if (partial) {
       const check = document.createElement("input");
       check.type = "checkbox";
       check.checked = listenSet.has(member.id);
       check.addEventListener("change", () => {
-        const next = new Set(users || []);
+        const latest = window.WechatFeed.groupListenUsers(state.settings, groupId) || [];
+        const next = new Set(latest);
         if (check.checked) next.add(member.id);
         else next.delete(member.id);
-        saveGroupUsers(groupId, Array.from(next)).catch((error) => setNotice(error.message));
+        setListenUsers(groupId, Array.from(next));
       });
       row.append(check);
     }
@@ -285,9 +307,9 @@ function renderMemberPanel(panel, groupId, members) {
     memberQuery.set(groupId, filter.value);
     const text = filter.value.trim().toLowerCase();
     for (const row of list.querySelectorAll(".member-row")) {
-      const name = (row.dataset.name || "").toLowerCase();
+      const hay = (row.dataset.hay || "").toLowerCase();
       const id = (row.dataset.id || "").toLowerCase();
-      row.hidden = Boolean(text) && !name.includes(text) && !id.includes(text);
+      row.hidden = Boolean(text) && !hay.includes(text) && !id.includes(text);
     }
   });
   panel.append(filter, list);
@@ -498,6 +520,7 @@ function renderDirectory() {
 function mergeSettings(next) {
   const incoming = { ...(next || {}) };
   delete incoming.gmgn_api_key;
+  if (groupUsersDirty) delete incoming.group_users;
   state.settings = { ...state.settings, ...incoming };
   if (window.WechatFeed) window.WechatFeed.setNumberFormat(state.settings.mcap_format);
 }
@@ -1076,6 +1099,11 @@ source.onmessage = (event) => {
   }
   if (payload.type === "settings" && payload.settings) {
     mergeSettings(payload.settings);
+    if (groupUsersDirty) {
+      renderRuntime();
+      renderKey();
+      return;
+    }
     render();
     return;
   }

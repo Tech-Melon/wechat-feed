@@ -12,6 +12,7 @@ try {
 }
 
 let noteTimer = 0;
+let liveSettings = {};
 function note(text, bad = false) {
   noteBox.textContent = text;
   noteBox.classList.toggle("bad", bad);
@@ -117,6 +118,26 @@ async function ensureMembers(groupId) {
   return members;
 }
 
+function memberHaystack(settings, member) {
+  const remark = (settings.user_remarks || {})[member.id] || "";
+  return [member.name, member.id, member.roomNick, member.remark, member.nick, remark]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+}
+
+function applyListen(groupId, users) {
+  const map = { ...(liveSettings.group_users || {}) };
+  if (users === null) delete map[groupId];
+  else map[groupId] = users;
+  liveSettings = { ...liveSettings, group_users: map };
+  refreshGroupLists(liveSettings);
+  send("setGroupUsers", { groupId, users }).then((state) => {
+    if (state?.ok) show(state);
+    else note(state?.detail || "没有保存成功", true);
+  });
+}
+
 function renderMemberPanel(panel, settings, groupId, members) {
   panel.replaceChildren();
   const users = window.WechatFeed.groupListenUsers(settings, groupId);
@@ -132,16 +153,10 @@ function renderMemberPanel(panel, settings, groupId, members) {
   partBtn.textContent = "只听部分";
   partBtn.classList.toggle("on", partial);
   allBtn.addEventListener("click", () => {
-    send("setGroupUsers", { groupId, users: null }).then((state) => {
-      if (state?.ok) show(state);
-      else note(state?.detail || "没有保存成功", true);
-    });
+    applyListen(groupId, null);
   });
   partBtn.addEventListener("click", () => {
-    send("setGroupUsers", { groupId, users: users || [] }).then((state) => {
-      if (state?.ok) show(state);
-      else note(state?.detail || "没有保存成功", true);
-    });
+    applyListen(groupId, users || []);
   });
   mode.append(allBtn, partBtn);
   panel.append(mode);
@@ -172,21 +187,19 @@ function renderMemberPanel(panel, settings, groupId, members) {
     const row = document.createElement("div");
     row.className = "member-row";
     row.dataset.id = member.id;
-    row.dataset.name = member.name || "";
-    const hit = String(member.name || "").toLowerCase().includes(needle) || member.id.toLowerCase().includes(needle);
+    row.dataset.hay = memberHaystack(settings, member);
+    const hit = (row.dataset.hay || "").includes(needle);
     row.hidden = Boolean(needle) && !hit;
     if (partial) {
       const check = document.createElement("input");
       check.type = "checkbox";
       check.checked = listenSet.has(member.id);
       check.addEventListener("change", () => {
-        const next = new Set(users || []);
+        const latest = window.WechatFeed.groupListenUsers(liveSettings, groupId) || [];
+        const next = new Set(latest);
         if (check.checked) next.add(member.id);
         else next.delete(member.id);
-        send("setGroupUsers", { groupId, users: Array.from(next) }).then((state) => {
-          if (state?.ok) show(state);
-          else note(state?.detail || "没有保存成功", true);
-        });
+        applyListen(groupId, Array.from(next));
       });
       row.append(check);
     }
@@ -242,9 +255,9 @@ function renderMemberPanel(panel, settings, groupId, members) {
     memberQuery.set(groupId, filter.value);
     const text = filter.value.trim().toLowerCase();
     for (const row of list.querySelectorAll(".member-row")) {
-      const name = (row.dataset.name || "").toLowerCase();
+      const hay = (row.dataset.hay || "").toLowerCase();
       const id = (row.dataset.id || "").toLowerCase();
-      row.hidden = Boolean(text) && !name.includes(text) && !id.includes(text);
+      row.hidden = Boolean(text) && !hay.includes(text) && !id.includes(text);
     }
   });
   panel.append(filter, list);
@@ -342,6 +355,7 @@ function show(state) {
     checkbox.checked = Boolean(state.enabled);
     floatBox.checked = Boolean(state.float_panel);
     const settings = state.settings || {};
+    liveSettings = settings;
     paintSurfaceModes(settings);
     refreshGroupLists(settings);
     status.className = "status ok";

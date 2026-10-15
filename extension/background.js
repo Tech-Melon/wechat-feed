@@ -213,7 +213,21 @@ async function refreshSettings() {
   return settings;
 }
 
+let writeTail = Promise.resolve();
+
 async function putSettings(patch) {
+  const job = writeTail.then(
+    () => putSettingsNow(patch),
+    () => putSettingsNow(patch),
+  );
+  writeTail = job.then(
+    () => undefined,
+    () => undefined,
+  );
+  return job;
+}
+
+async function putSettingsNow(patch) {
   const merged = publicSettings({ ...settings, ...patch });
   overlay = Boolean(merged.gmgn_overlay);
   floatPanel = Boolean(merged.float_panel);
@@ -376,6 +390,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     const map = { ...(settings.group_users || {}) };
     if (message.users === null || message.users === undefined) delete map[groupId];
     else map[groupId] = Array.isArray(message.users) ? message.users.map(String) : [];
+    settings = { ...settings, group_users: map };
     putSettings({ group_users: map })
       .then(() => sendResponse(snapshotState()))
       .catch(() => sendResponse({ ok: false }));
