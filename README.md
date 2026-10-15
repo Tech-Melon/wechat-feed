@@ -100,7 +100,7 @@
 
 ### GMGN 限频
 
-每秒已用权重不超过套餐权重（免费版 5）：`market/search`、`token/info`、`token/security` 每次扣 1。裸 EVM 一次并行搜无链 + bsc / eth / robinhood。search 已有链和市值就不再打 token/info；缺市值时 info 与 security 并行。结果缓存 1 分钟。收到 429 先冷却 8 秒。升级套餐后设环境变量 `WECHAT_FEED_GMGN_RATE=<新权重>`。
+每秒已用权重不超过套餐权重（免费版 5）：`market/search`、`token/info`、`token/security` 每次扣 1。裸 EVM 先打一次不带链的 search（官方会在 `coins[].chain` 里返回链）；只有这次没命中才补 bsc / eth / robinhood。search 已有链和市值就不再打 token/info；缺市值时 info 与 security 并行。结果缓存 1 分钟。收到 429 先冷却 8 秒。升级套餐后设环境变量 `WECHAT_FEED_GMGN_RATE=<新权重>`。
 
 ## 边界
 

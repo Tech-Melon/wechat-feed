@@ -148,7 +148,7 @@ def test_public_docs_cover_wda_and_unpacked_extension() -> None:
     guide = (ROOT / "docs" / "使用指南.md").read_text(encoding="utf-8")
     assert "不在监控群的不入库" in guide
     assert "只过滤显示" in guide
-    assert "并行打 GMGN search" in guide
+    assert "不带链的 GMGN" in guide
 
 
 def test_api_defaults_and_two_paths(client: TestClient) -> None:

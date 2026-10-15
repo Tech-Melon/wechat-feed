@@ -112,7 +112,7 @@ _GMGN_API_CHAIN = {
     "solana": "sol",
 }
 
-# EVM 未定链时只搜这三条：search 命中即可，不再盲探 token/info。
+# 无链 search 没命中时，才按这三条补搜。
 _EVM_SEARCH_CHAINS = ("bsc", "eth", "robinhood")
 
 
@@ -846,24 +846,15 @@ class TokenIndex:
         self, address: str, hint: str = ""
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         hint_norm = _norm_chain(hint)
-        if hint_norm:
-            queries = [self._gmgn_search(address, hint_norm)]
-        elif _kind_of(address) == "evm":
-            queries = [
-                self._gmgn_search(address),
-                *[self._gmgn_search(address, chain) for chain in _EVM_SEARCH_CHAINS],
-            ]
-        else:
-            queries = [self._gmgn_search(address)]
-        gathered = await asyncio.gather(*queries, return_exceptions=True)
         coins: list[dict[str, Any]] = []
         wallets: list[dict[str, Any]] = []
         seen_coins: set[tuple[str, str]] = set()
         seen_wallets: set[tuple[str, str]] = set()
-        for item in gathered:
-            if not isinstance(item, dict):
-                continue
-            more_coins, more_wallets = parse_search(item, address)
+
+        def absorb(payload: object) -> None:
+            if not isinstance(payload, dict):
+                return
+            more_coins, more_wallets = parse_search(payload, address)
             for row in more_coins:
                 key = (
                     gmgn_api_chain(str(row.get("chain") or row.get("network") or "")),
@@ -882,6 +873,18 @@ class TokenIndex:
                     continue
                 seen_wallets.add(key)
                 wallets.append(row)
+
+        # 官方 OpenAPI：不带 chain 的 search 会全链反查，coins[].chain 就是链。
+        first = await self._gmgn_search(address, hint_norm)
+        absorb(first)
+        if coins or wallets or hint_norm or _kind_of(address) != "evm":
+            return coins, wallets
+        gathered = await asyncio.gather(
+            *[self._gmgn_search(address, chain) for chain in _EVM_SEARCH_CHAINS],
+            return_exceptions=True,
+        )
+        for item in gathered:
+            absorb(item)
         return coins, wallets
 
     async def _gmgn_pair(self, chain: str, address: str) -> dict[str, Any] | None:
