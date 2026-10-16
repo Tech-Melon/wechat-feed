@@ -27,6 +27,7 @@ from wechat_feed.tokens import (
     format_tax,
     gmgn_api_chain,
     gmgn_token_url,
+    kline_resolution,
     parse_search,
 )
 from wechat_feed.upstream import _allowed, _stream_urls, parse_sse_block
@@ -157,6 +158,7 @@ def test_ca_board_api(client: TestClient) -> None:
     listed = client.get("/api/ca-board")
     assert listed.status_code == 200
     assert listed.json()["board"] == []
+    assert listed.json()["enabled"] is True
     assert "tokens" in listed.json()["stats"]
     missing = client.get("/api/ca-board/user/wxid_nobody")
     assert missing.status_code == 200
@@ -183,12 +185,22 @@ def test_api_defaults_and_two_paths(client: TestClient) -> None:
     assert settings.json()["blocked_users"] == []
     assert settings.json()["groups"] == []
     assert settings.json()["mcap_format"] == "cn"
+    assert settings.json()["ca_board"] is True
     patched = client.put("/api/settings", json={"mcap_format": "en"})
     assert patched.status_code == 200
     assert patched.json()["mcap_format"] == "en"
     assert normalize_settings({"mcap_format": "en"})["mcap_format"] == "en"
     with pytest.raises(ValueError):
         normalize_settings({"mcap_format": "usd"})
+    closed = client.put("/api/settings", json={"ca_board": False})
+    assert closed.status_code == 200
+    assert closed.json()["ca_board"] is False
+    listed = client.get("/api/ca-board")
+    assert listed.status_code == 200
+    assert listed.json()["enabled"] is False
+    assert listed.json()["board"] == []
+    with pytest.raises(ValueError):
+        normalize_settings({"ca_board": "off"})
 
     page = client.get("/")
     assert page.status_code == 200
@@ -343,6 +355,13 @@ def test_candidate_chains_prefers_dex_then_kind() -> None:
     assert format_x(5.93) == "5.93x"
     assert wilson_lower(10, 12) > wilson_lower(1, 1)
     assert ath_from_kline({"data": {"list": [{"high": 12}, {"h": 20}]}}) == 20
+    assert kline_resolution(int(__import__("time").time()) - 120) == "1m"
+    assert kline_resolution(int(__import__("time").time()) - 80000) == "4h"
+    assert ath_from_kline(
+        {"data": {"list": [{"high": 0.002}, {"high": 0.005}]}},
+        current_mcap=10_000,
+        current_price=0.001,
+    ) == 50_000
 
 
 def test_ca_store_tracks_first_call_and_board(tmp_path: Path) -> None:
@@ -379,8 +398,11 @@ def test_ca_store_tracks_first_call_and_board(tmp_path: Path) -> None:
     assert out[0]["foundById"] == "wxid_a"
     assert out[0]["foundGroup"] == "奶牛群"
     assert out[0]["isFirstCall"] is True
+    assert out[0]["isGroupFirst"] is True
+    assert out[0]["sameGroupAsGlobal"] is True
     assert out[0]["nowX"] == 1
     assert out[0]["maxX"] == 1
+    assert out[0]["groupNowX"] == 1
     store.remember(
         {
             **first,
@@ -406,6 +428,38 @@ def test_ca_store_tracks_first_call_and_board(tmp_path: Path) -> None:
     assert by_id["wxid_b"]["calls"] == 1
     assert by_id["wxid_a"]["wins"] == 1
     assert by_id["wxid_b"]["wins"] == 1
+    other = store.remember(
+        {
+            "id": "c3",
+            "senderUsername": "wxid_c",
+            "senderName": "Flyhoo",
+            "conversationId": "87654321@chatroom",
+            "conversationName": "YY",
+            "createTime": 1_800_000_200,
+        },
+        [{"address": address, "chain": "bsc", "marketCap": 4000, "athMarketCap": 8000}],
+    )
+    assert other[0]["isFirstCall"] is False
+    assert other[0]["isGroupFirst"] is True
+    assert other[0]["sameGroupAsGlobal"] is False
+    assert other[0]["foundBy"] == "大白"
+    assert other[0]["groupFoundBy"] == "Flyhoo"
+    assert other[0]["nowX"] == 4
+    assert other[0]["maxX"] == 8
+    assert other[0]["groupNowX"] == 1
+    assert other[0]["groupMaxX"] == 2
+    later = store.decorate_card(
+        {
+            "id": "c4",
+            "senderUsername": "wxid_d",
+            "conversationId": "87654321@chatroom",
+            "createTime": 1_800_000_300,
+            "tokenCards": [{"address": address, "chain": "bsc"}],
+        }
+    )
+    assert later["tokenCards"][0]["isGroupFirst"] is False
+    assert later["tokenCards"][0]["groupFoundBy"] == "Flyhoo"
+    assert later["tokenCards"][0]["groupNowX"] == 1
     profile = store.user_profile("wxid_a")
     assert profile["user"]["calls"] == 1
     assert profile["calls"][0]["isFirst"] is True
@@ -1228,10 +1282,30 @@ def test_package_omits_local_data_and_api_key() -> None:
     assert "await reloadFeeds()" in app_js
     assert "function setListenUsers" in app_js
     assert "function renderBoard" in app_js
+    assert "function medalSvg" in app_js
+    assert "function filterUserCalls" in app_js
+    assert "function sortUserCalls" in app_js
+    assert "data-user-sort" in app_js
+    assert "data-user-range" in app_js
     assert "function formatFresh" in feed
+    assert "function formatDateTime" in feed
+    assert "force=True" in (ROOT / "src" / "wechat_feed" / "tokens.py").read_text(encoding="utf-8")
+    assert "ca-pill score" in app_js
+    castore_py = (ROOT / "src" / "wechat_feed" / "castore.py").read_text(encoding="utf-8")
+    assert "WIN_X = 1.5" in castore_py
+    assert "涨幅 50%" in app_js
+    assert "ca-win-rule" in app_js
     assert "刚刚" in feed
     assert "分钟前" in feed
     assert "wf-debut" in feed
+    assert "所有群首发" in feed
+    assert "本群首发" in feed
+    assert "wf-xlab" in feed
+    assert "is-debut" in feed
+    assert "ca_board" in (ROOT / "src" / "wechat_feed" / "config.py").read_text(encoding="utf-8")
+    assert "id=\"ca-board-on\"" in (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+    assert "CA 发现榜" in (ROOT / "extension" / "popup.html").read_text(encoding="utf-8")
+    assert "setCaBoard" in background
     assert "wf-fresh" in feed
     assert "isFirstCall" in feed
     assert "wf-xbar" in feed
@@ -1243,6 +1317,10 @@ def test_package_omits_local_data_and_api_key() -> None:
     assert "ca-page" in (ROOT / "web" / "index.html").read_text(encoding="utf-8")
     css = (ROOT / "web" / "app.css").read_text(encoding="utf-8")
     assert ".member-row[hidden]" in css
+    assert "ca-medal" in css
+    assert "ca-pill.score" in css
+    assert "ca-main" in css
+    assert "ca-stats" in css
     assert 'headers={"Cache-Control": "no-store"}' in (
         ROOT / "src" / "wechat_feed" / "server.py"
     ).read_text(encoding="utf-8")

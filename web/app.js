@@ -16,6 +16,7 @@ const state = {
     float_ca_only: false,
     all_feed_groups: [],
     ca_feed_groups: [],
+    ca_board: true,
   },
   runtime: { upstream: "idle", detail: "正在读取状态" },
   messages: [],
@@ -34,6 +35,9 @@ const state = {
   boardStats: {},
   userProfile: null,
   userCalls: [],
+  userSort: "latest",
+  userRange: "all",
+  userWin: "all",
 };
 
 function emptyFeedCache() {
@@ -558,6 +562,10 @@ function render() {
 }
 
 let boardTimer = 0;
+function boardEnabled() {
+  return state.settings.ca_board !== false;
+}
+
 function boardRoute() {
   const hash = (location.hash || "").replace(/^#/, "");
   if (hash === "board") return { view: "board" };
@@ -572,11 +580,19 @@ function boardRoute() {
 }
 
 function openBoard() {
+  if (!boardEnabled()) {
+    setNotice("排行榜已关闭");
+    return;
+  }
   location.hash = "board";
 }
 
 function openBoardUser(userId) {
   if (!userId) return;
+  if (!boardEnabled()) {
+    setNotice("排行榜已关闭");
+    return;
+  }
   location.hash = `board/${encodeURIComponent(userId)}`;
 }
 
@@ -589,6 +605,60 @@ function moneyText(value) {
   return parts && parts.text ? `${parts.text}${parts.unit || ""}` : "—";
 }
 
+function medalSvg(rank, size) {
+  const n = Number(rank);
+  if (n < 1 || n > 3) {
+    return `<div class="ca-rank">${n || "—"}</div>`;
+  }
+  const tone = n === 1 ? "gold" : n === 2 ? "silver" : "bronze";
+  const px = Number(size) || 32;
+  const h = Math.round((px * 38) / 32);
+  return `<svg class="ca-medal ${tone}" viewBox="0 0 32 38" width="${px}" height="${h}" aria-label="第${n}名">
+    <path class="ribbon-l" d="M9.2 1.2h5.4l1.2 11.2H8.2z"/>
+    <path class="ribbon-r" d="M17.4 1.2h5.4l1 11.2h-7.4z"/>
+    <circle class="coin" cx="16" cy="23.2" r="12.4"/>
+    <circle class="ring" cx="16" cy="23.2" r="9.4"/>
+    <path class="star" d="M16 15.2l1.85 3.7 4.1.58-2.96 2.9.72 4.08L16 24.4l-3.71 2.06.72-4.08-2.96-2.9 4.1-.58z"/>
+  </svg>`;
+}
+
+function rangeStart(range, nowSec) {
+  const now = Number(nowSec);
+  const stamp = Number.isFinite(now) ? now : Date.now() / 1000;
+  if (range === "today") {
+    const date = new Date(stamp * 1000);
+    date.setHours(0, 0, 0, 0);
+    return date.getTime() / 1000;
+  }
+  if (range === "7d") return stamp - 7 * 86400;
+  if (range === "30d") return stamp - 30 * 86400;
+  return 0;
+}
+
+function filterUserCalls(calls, { range, win, nowSec } = {}) {
+  const start = rangeStart(range || "all", nowSec);
+  return (calls || []).filter((item) => {
+    const at = Number(item.calledAt) || 0;
+    if (start && at < start) return false;
+    if (win === "win" && !item.win) return false;
+    if (win === "lose" && item.win) return false;
+    return true;
+  });
+}
+
+function sortUserCalls(calls, sort) {
+  const rows = [...(calls || [])];
+  const key = sort || "latest";
+  rows.sort((a, b) => {
+    if (key === "oldest") return (a.calledAt || 0) - (b.calledAt || 0);
+    if (key === "maxX") return (b.maxX || 0) - (a.maxX || 0);
+    if (key === "nowX") return (b.nowX || 0) - (a.nowX || 0);
+    if (key === "mcap") return (b.callMcap || 0) - (a.callMcap || 0);
+    return (b.calledAt || 0) - (a.calledAt || 0);
+  });
+  return rows;
+}
+
 function avatarBlock(userId, name, size) {
   const hue = window.WechatFeed.hue(userId || name);
   const px = size || 36;
@@ -598,6 +668,12 @@ function avatarBlock(userId, name, size) {
 }
 
 async function loadBoard() {
+  if (!boardEnabled()) {
+    state.board = [];
+    state.boardStats = {};
+    renderBoard();
+    return;
+  }
   try {
     const payload = await readJson(await fetch("/api/ca-board"));
     state.board = payload.board || [];
@@ -639,9 +715,19 @@ function bindBrokenAvatars(root) {
 }
 
 function renderStrip() {
+  const strip = document.querySelector("#ca-strip");
   const count = document.querySelector("#ca-strip-count");
   const top = document.querySelector("#ca-strip-top");
+  const toggle = document.querySelector("#ca-board-on");
   if (!count || !top) return;
+  const enabled = boardEnabled();
+  if (strip) strip.classList.toggle("is-off", !enabled);
+  if (toggle && toggle.checked !== enabled) toggle.checked = enabled;
+  if (!enabled) {
+    count.textContent = "已关闭，不刷 GMGN";
+    top.innerHTML = "";
+    return;
+  }
   const rows = state.board || [];
   const stats = state.boardStats || {};
   const esc = window.WechatFeed.escapeText;
@@ -656,8 +742,8 @@ function renderStrip() {
     .map((row) => {
       const name = esc(row.name || row.userId);
       return `<button type="button" class="ca-chip" data-rank="${row.rank}" data-ca-user="${esc(row.userId)}">
+        ${medalSvg(row.rank, 18)}
         ${avatarBlock(row.userId, row.name, 22)}
-        <b>${row.rank}</b>
         <span>${name}</span>
         <em>${esc(row.winRateText)}</em>
       </button>`;
@@ -671,17 +757,20 @@ function personRow(row, starred) {
   const on = starred.has(row.userId);
   const name = esc(row.name || row.userId);
   return `<article class="ca-person" data-rank="${row.rank}" data-ca-user="${esc(row.userId)}">
-    <div class="ca-rank">${row.rank || "—"}</div>
+    ${medalSvg(row.rank, 32)}
     ${avatarBlock(row.userId, row.name, 36)}
-    <div class="ca-who">
-      <strong title="${name}">${name}</strong>
-      <span>${row.calls} 次 · 得分 ${esc(row.scoreText || "0")}</span>
-    </div>
-    <div class="ca-pills">
-      <span class="ca-pill win">胜率 ${esc(row.winRateText)}</span>
-      <span class="ca-pill">均 ${esc(row.avgXText || "—")}</span>
-      <span class="ca-pill max">最高 ${esc(row.maxXText || "—")}</span>
-      <span class="ca-pill">${row.wins}/${row.calls} 胜</span>
+    <div class="ca-main">
+      <div class="ca-who">
+        <strong title="${name}">${name}</strong>
+        <span>${row.calls} 次喊单</span>
+      </div>
+      <div class="ca-stats">
+        <span class="ca-pill score" title="威尔逊下限 × 次数 × 平均倍数"><span class="ca-k">得分</span><b>${esc(row.scoreText || "0")}</b></span>
+        <span class="ca-pill win"><span class="ca-k">胜率</span><b>${esc(row.winRateText)}</b></span>
+        <span class="ca-pill"><span class="ca-k">均倍</span><b>${esc(row.avgXText || "—")}</b></span>
+        <span class="ca-pill max"><span class="ca-k">最高</span><b>${esc(row.maxXText || "—")}</b></span>
+        <span class="ca-pill"><span class="ca-k">胜场</span><b>${row.wins}/${row.calls}</b></span>
+      </div>
     </div>
     <button type="button" class="ca-star${on ? " on" : ""}" data-board-star="${esc(row.userId)}">${on ? "已星标" : "星标"}</button>
   </article>`;
@@ -693,43 +782,87 @@ function renderUserPage(userId) {
   const box = document.querySelector("#ca-page-body");
   const esc = window.WechatFeed.escapeText;
   const user = state.userProfile || { userId, name: userId };
-  const calls = state.userCalls || [];
+  const all = state.userCalls || [];
+  const filtered = filterUserCalls(all, {
+    range: state.userRange,
+    win: state.userWin,
+  });
+  const calls = sortUserCalls(filtered, state.userSort);
   const starred = new Set(state.settings.starred_users || []);
   const on = starred.has(user.userId);
   const name = esc(user.name || user.userId);
+  const sortOn = (key) => (state.userSort === key ? " on" : "");
+  const rangeOn = (key) => (state.userRange === key ? " on" : "");
+  const winOn = (key) => (state.userWin === key ? " on" : "");
   title.textContent = name;
-  sub.textContent = `${user.calls || calls.length} 次喊单 · 胜率 ${user.winRateText || "0%"} · 得分 ${user.scoreText || "0"}`;
+  sub.innerHTML = `<span class="ca-sub-item"><em>喊单</em><b>${user.calls || all.length}</b></span>
+    <span class="ca-sub-item win"><em>胜率</em><b>${esc(user.winRateText || "0%")}</b></span>
+    <span class="ca-sub-item"><em>得分</em><b>${esc(user.scoreText || "0")}</b></span>`;
   const head = `<div class="ca-userhead">
     ${avatarBlock(user.userId, user.name, 48)}
     <div class="ca-who">
       <strong>${name}</strong>
-      <span>${user.calls || calls.length} 次 · 均 ${esc(user.avgXText || "—")} · 最高 ${esc(user.maxXText || "—")}</span>
+      <div class="ca-stats">
+        <span class="ca-pill"><span class="ca-k">均倍</span><b>${esc(user.avgXText || "—")}</b></span>
+        <span class="ca-pill max"><span class="ca-k">最高</span><b>${esc(user.maxXText || "—")}</b></span>
+      </div>
     </div>
+    <span class="ca-pill score" title="威尔逊下限 × 次数 × 平均倍数"><span class="ca-k">得分</span><b>${esc(user.scoreText || "0")}</b></span>
     <button type="button" class="ca-star${on ? " on" : ""}" data-board-star="${esc(user.userId)}">${on ? "已星标" : "星标"}</button>
-  </div>`;
-  if (!calls.length) {
+  </div>
+  <div class="ca-toolbar">
+    <div class="ca-seg" role="tablist" aria-label="排序">
+      <button type="button" data-user-sort="latest" class="${sortOn("latest")}">最新</button>
+      <button type="button" data-user-sort="oldest" class="${sortOn("oldest")}">最早</button>
+      <button type="button" data-user-sort="maxX" class="${sortOn("maxX")}">最高倍</button>
+      <button type="button" data-user-sort="nowX" class="${sortOn("nowX")}">当前倍</button>
+      <button type="button" data-user-sort="mcap" class="${sortOn("mcap")}">喊单市值</button>
+    </div>
+    <div class="ca-seg" role="tablist" aria-label="日期">
+      <button type="button" data-user-range="all" class="${rangeOn("all")}">全部</button>
+      <button type="button" data-user-range="today" class="${rangeOn("today")}">今天</button>
+      <button type="button" data-user-range="7d" class="${rangeOn("7d")}">近 7 天</button>
+      <button type="button" data-user-range="30d" class="${rangeOn("30d")}">近 30 天</button>
+    </div>
+    <div class="ca-seg" role="tablist" aria-label="胜负">
+      <button type="button" data-user-win="all" class="${winOn("all")}">全部</button>
+      <button type="button" data-user-win="win" class="${winOn("win")}">已胜</button>
+      <button type="button" data-user-win="lose" class="${winOn("lose")}">未到 50%</button>
+    </div>
+  </div>
+  <p class="ca-filter-hint">${calls.length === all.length ? `${all.length} 条` : `显示 ${calls.length} / ${all.length} 条`}</p>`;
+  if (!all.length) {
     box.innerHTML = `${head}<p class="ca-empty">这个人还没有记入有效 CA。</p>`;
+    bindBrokenAvatars(box);
+    return;
+  }
+  if (!calls.length) {
+    box.innerHTML = `${head}<p class="ca-empty">当前筛选下没有 CA。</p>`;
     bindBrokenAvatars(box);
     return;
   }
   box.innerHTML = head + calls.map((item) => {
     const symbol = item.symbol ? `$${esc(item.symbol)}` : esc(item.address.slice(0, 8));
-    const win = item.win ? `<span class="ca-pill win">胜</span>` : `<span class="ca-pill">未到 2x</span>`;
-    const first = item.isFirst ? `<span class="wf-debut">首发</span>` : "";
-    const when = window.WechatFeed.formatTime(item.calledAt);
+    const win = item.win
+      ? `<span class="ca-pill win" title="ATH ≥ 该用户首次喊单市值的 1.5 倍（涨幅 50%）"><span class="ca-k">结果</span><b>胜</b></span>`
+      : `<span class="ca-pill" title="ATH 未到该用户首次喊单市值的 1.5 倍"><span class="ca-k">结果</span><b>未到 50%</b></span>`;
+    const first = item.isFirst ? `<span class="wf-debut">所有群首发</span>` : "";
+    const when = window.WechatFeed.formatDateTime
+      ? window.WechatFeed.formatDateTime(item.calledAt)
+      : window.WechatFeed.formatTime(item.calledAt);
     return `<article class="ca-call">
       <div class="ca-call-top">
         <strong>${symbol}</strong>
         ${first}
         ${win}
-        <span class="ca-pill">${esc(item.chain || "")}</span>
+        <span class="ca-pill"><span class="ca-k">链</span><b>${esc(item.chain || "")}</b></span>
       </div>
       <div class="ca-call-x">
-        <span class="ca-pill">喊单 ${esc(moneyText(item.callMcap))}</span>
-        <span class="ca-pill">当前 ${esc(item.nowXText || "—")}</span>
-        <span class="ca-pill max">最高 ${esc(item.maxXText || "—")}</span>
+        <span class="ca-pill"><span class="ca-k">喊单市值</span><b>${esc(moneyText(item.callMcap))}</b></span>
+        <span class="ca-pill"><span class="ca-k">当前倍</span><b>${esc(item.nowXText || "—")}</b></span>
+        <span class="ca-pill max"><span class="ca-k">最高倍</span><b>${esc(item.maxXText || "—")}</b></span>
       </div>
-      <div class="ca-call-meta">${esc(item.groupName || "")}${when ? ` · ${esc(when)}` : ""} · ${esc(item.address)}</div>
+      <div class="ca-call-meta">${esc(item.groupName || "")}${when ? ` · <time>${esc(when)}</time>` : ""} · ${esc(item.address)}</div>
     </article>`;
   }).join("");
   bindBrokenAvatars(box);
@@ -743,9 +876,9 @@ function renderBoardPage() {
   const stats = state.boardStats || {};
   const starred = new Set(state.settings.starred_users || []);
   title.textContent = "CA 发现榜";
-  sub.textContent = stats.tokens
-    ? `${stats.users || rows.length} 人 · ${stats.tokens} 个 CA。胜率按 ATH ≥ 2 倍该用户首次喊单市值。空闲时自动刷新。`
-    : "按喊单次数、胜率（ATH ≥ 2 倍该用户首次喊单市值）和平均倍数综合打分。";
+  sub.innerHTML = stats.tokens
+    ? `${stats.users || rows.length} 人 · ${stats.tokens} 个 CA · <span class="ca-win-rule" title="相对该用户自己第一次喊到这个 CA 时的市值">胜：ATH ≥ 1.5 倍（涨幅 50%）</span>`
+    : `按喊单次数、胜率和平均倍数综合打分 · <span class="ca-win-rule">胜：ATH ≥ 1.5 倍（涨幅 50%）</span>`;
   if (!rows.length) {
     box.innerHTML = `<p class="ca-empty">还没有 CA 发现记录。群里出现合约并查出市值后会记在这里。</p>`;
     return;
@@ -757,8 +890,14 @@ function renderBoardPage() {
 function renderBoard() {
   const page = document.querySelector("#ca-page");
   const route = boardRoute();
-  document.body.classList.toggle("is-board", route.view !== "feed");
   renderStrip();
+  if (!boardEnabled()) {
+    document.body.classList.remove("is-board");
+    if (page) page.hidden = true;
+    if (route.view !== "feed" && location.hash) location.hash = "";
+    return;
+  }
+  document.body.classList.toggle("is-board", route.view !== "feed");
   if (!page) return;
   if (route.view === "feed") {
     page.hidden = true;
@@ -818,6 +957,7 @@ async function saveSettings(patch, { skipFeed = false } = {}) {
     renderSurfaceModes();
     renderGroups();
     renderBlocked();
+    renderBoard();
   } else {
     render();
   }
@@ -1353,6 +1493,7 @@ source.onmessage = (event) => {
       return;
     }
     render();
+    scheduleBoard();
     return;
   }
   if (payload.type === "cleared") {
@@ -1392,6 +1533,18 @@ const sentinel = new IntersectionObserver((entries) => {
 });
 sentinel.observe(more);
 
+document.querySelector("#ca-board-on")?.addEventListener("change", async (event) => {
+  const on = Boolean(event.target.checked);
+  try {
+    await saveSettings({ ca_board: on }, { skipFeed: true });
+    if (!on && boardRoute().view !== "feed") location.hash = "";
+    await loadBoard();
+  } catch (error) {
+    event.target.checked = boardEnabled();
+    setNotice(error.message);
+  }
+});
+
 document.addEventListener("click", (event) => {
   const star = event.target.closest("[data-board-star]");
   if (star) {
@@ -1406,6 +1559,30 @@ document.addEventListener("click", (event) => {
   }
   if (event.target.closest("[data-board-back]")) {
     closeBoard();
+    return;
+  }
+  const sortBtn = event.target.closest("[data-user-sort]");
+  if (sortBtn) {
+    event.preventDefault();
+    event.stopPropagation();
+    state.userSort = sortBtn.dataset.userSort || "latest";
+    if (boardRoute().view === "user") renderUserPage(boardRoute().userId);
+    return;
+  }
+  const rangeBtn = event.target.closest("[data-user-range]");
+  if (rangeBtn) {
+    event.preventDefault();
+    event.stopPropagation();
+    state.userRange = rangeBtn.dataset.userRange || "all";
+    if (boardRoute().view === "user") renderUserPage(boardRoute().userId);
+    return;
+  }
+  const winBtn = event.target.closest("[data-user-win]");
+  if (winBtn) {
+    event.preventDefault();
+    event.stopPropagation();
+    state.userWin = winBtn.dataset.userWin || "all";
+    if (boardRoute().view === "user") renderUserPage(boardRoute().userId);
     return;
   }
   const user = event.target.closest("[data-ca-user]");

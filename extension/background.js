@@ -429,6 +429,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       .catch(() => sendResponse({ ok: false }));
     return true;
   }
+  if (message?.type === "setCaBoard") {
+    putSettings({ ca_board: Boolean(message.enabled) })
+      .then(() => sendResponse(snapshotState()))
+      .catch((error) => sendResponse({ ok: false, detail: error.message || "本地服务没有启动" }));
+    return true;
+  }
   if (message?.type === "setMcapFormat") {
     const format = String(message.format || "cn") === "en" ? "en" : "cn";
     putSettings({ mcap_format: format })

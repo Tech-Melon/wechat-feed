@@ -2,6 +2,7 @@ const status = document.querySelector("#status");
 const noteBox = document.querySelector("#note");
 const checkbox = document.querySelector("#gmgn");
 const floatBox = document.querySelector("#float-panel");
+const boardBox = document.querySelector("#ca-board");
 const keyInput = document.querySelector("#key");
 const keyState = document.querySelector("#key-state");
 
@@ -350,10 +351,12 @@ function fillGroupList(box, settings, storedKey) {
 function show(state) {
   checkbox.disabled = false;
   floatBox.disabled = false;
+  boardBox.disabled = false;
   if (!state) return;
   if (state.ok) {
     checkbox.checked = Boolean(state.enabled);
     floatBox.checked = Boolean(state.float_panel);
+    boardBox.checked = state.settings?.ca_board !== false;
     const settings = state.settings || {};
     liveSettings = settings;
     paintSurfaceModes(settings);
@@ -393,6 +396,7 @@ async function toggle(box, type) {
 
 checkbox.addEventListener("change", () => toggle(checkbox, "setOverlay"));
 floatBox.addEventListener("change", () => toggle(floatBox, "setFloatPanel"));
+boardBox.addEventListener("change", () => toggle(boardBox, "setCaBoard"));
 
 for (const root of document.querySelectorAll(".surface-mode")) {
   root.addEventListener("click", async (event) => {

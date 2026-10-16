@@ -508,31 +508,79 @@ def _num(value: Any, default: float = 0.0) -> float:
         return default
 
 
-def ath_from_kline(payload: dict[str, Any] | None, current_mcap: float = 0.0) -> float:
+def kline_resolution(created_at: int, now: int | None = None) -> str:
+    """和 Ave 一样按币龄选周期：越新越细。GMGN 用 1m/5m/1h/4h/1d。"""
+    stamp = int(now or time.time())
+    age = max(0, stamp - int(created_at or 0)) if created_at else 7 * 86400
+    if age < 600:
+        return "1m"
+    if age < 3600:
+        return "5m"
+    if age < 43200:
+        return "1h"
+    if age < 86400:
+        return "4h"
+    return "1d"
+
+
+def ath_from_kline(
+    payload: dict[str, Any] | None,
+    current_mcap: float = 0.0,
+    current_price: float = 0.0,
+    since: int = 0,
+) -> float:
+    """扫 K 线高点。有市值用市值；只有价格时用 现市值 × 最高价/现价，对齐 Ave 的 high×供给。"""
     if not isinstance(payload, dict):
         return 0.0
     raw_data = payload.get("data")
     data = raw_data if isinstance(raw_data, (dict, list)) else payload
     rows: list[Any] = []
     if isinstance(data, dict):
-        raw = data.get("list") or data.get("klines") or data.get("items") or []
+        raw = (
+            data.get("list")
+            or data.get("klines")
+            or data.get("items")
+            or data.get("points")
+            or []
+        )
         rows = raw if isinstance(raw, list) else []
     elif isinstance(data, list):
         rows = data
-    highs: list[float] = []
+    mcaps: list[float] = []
+    prices: list[float] = []
+    since_ts = int(since or 0)
     for row in rows:
         if isinstance(row, dict):
+            bar_time = _unix_seconds(
+                row.get("time") or row.get("timestamp") or row.get("t") or row.get("open_time")
+            )
+            if since_ts and bar_time and bar_time < since_ts:
+                continue
             mcap = _num(row.get("market_cap") or row.get("mcp") or row.get("usd_market_cap"))
             high = _num(row.get("high") or row.get("h") or row.get("max"))
-            highs.append(mcap if mcap > 0 else high)
+            if mcap > 0:
+                mcaps.append(mcap)
+            elif high >= 1:
+                mcaps.append(high)
+            elif high > 0:
+                prices.append(high)
         elif isinstance(row, (list, tuple)) and len(row) >= 3:
-            highs.append(_num(row[2]))
-    peak = max(highs) if highs else 0.0
-    if peak <= 0:
-        return 0.0
-    if peak < 1 and current_mcap >= 100:
-        return 0.0
-    return peak
+            bar_time = _unix_seconds(row[0])
+            if since_ts and bar_time and bar_time < since_ts:
+                continue
+            high = _num(row[2])
+            if high >= 1:
+                mcaps.append(high)
+            elif high > 0:
+                prices.append(high)
+    if mcaps:
+        peak = max(mcaps)
+        if peak < 1 and current_mcap >= 100:
+            return 0.0
+        return peak
+    if prices and current_price > 0 and current_mcap > 0:
+        return current_mcap * (max(prices) / current_price)
+    return 0.0
 
 
 def _unix_seconds(value: Any) -> int:
@@ -808,7 +856,7 @@ class TokenIndex:
         return [item for item in slots if item is not None]
 
     async def quote(self, address: str, chain: str = "") -> dict[str, Any] | None:
-        """空闲刷新只用 search（权重 1）。缺 ATH 才补 4h K 线。"""
+        """空闲刷新：search 拿现价，再按币龄打 GMGN K 线扫最高倍。"""
         if os.environ.get("WECHAT_FEED_DISABLE_TOKEN") == "1":
             return None
         address = str(address or "").strip()
@@ -819,8 +867,8 @@ class TokenIndex:
             return None
         picked = _best_coin(coins) if len(coins) > 1 else coins[0]
         token = _from_search(picked, address)
-        if token and _num(token.get("athMarketCap")) <= 0:
-            token = await self._fill_ath(token)
+        if token:
+            token = await self._fill_ath(token, force=True)
         return token
 
     async def resolve_one(
@@ -967,8 +1015,9 @@ class TokenIndex:
             return None
         return _from_gmgn(info, security if isinstance(security, dict) else None, chain, address)
 
-    async def _fill_ath(self, token: dict[str, Any]) -> dict[str, Any]:
-        if _num(token.get("athMarketCap")) > 0:
+    async def _fill_ath(self, token: dict[str, Any], *, force: bool = False) -> dict[str, Any]:
+        existing = _num(token.get("athMarketCap"))
+        if existing > 0 and not force:
             return token
         chain = str(token.get("chain") or "")
         address = str(token.get("address") or "")
@@ -977,31 +1026,43 @@ class TokenIndex:
         created = int(token.get("createdAt") or 0)
         now = int(time.time())
         start = created if created > 0 else now - 180 * 86400
-        payload = await self._gmgn_call(
-            "/v1/market/token_kline",
-            {
-                "chain": gmgn_api_chain(chain),
-                "address": address,
-                "resolution": "4h",
-                "from": str(start),
-                "to": str(now),
-            },
-        )
-        peak = ath_from_kline(payload, _num(token.get("marketCap")))
-        if peak <= 0:
+        resolution = kline_resolution(created, now)
+        current_mcap = _num(token.get("marketCap"))
+        current_price = _num(token.get("priceUsd") or token.get("price"))
+        peak = 0.0
+        seen_res: set[str] = set()
+        for res in (resolution, "4h"):
+            if res in seen_res:
+                continue
+            seen_res.add(res)
             payload = await self._gmgn_call(
                 "/v1/market/token_kline",
                 {
                     "chain": gmgn_api_chain(chain),
                     "address": address,
-                    "resolution": "4h",
-                    "from": str(start * 1000),
-                    "to": str(now * 1000),
+                    "resolution": res,
+                    "from": str(start),
+                    "to": str(now),
                 },
             )
-            peak = ath_from_kline(payload, _num(token.get("marketCap")))
-        if peak > 0:
-            token["athMarketCap"] = peak
+            peak = ath_from_kline(payload, current_mcap, current_price, start)
+            if peak <= 0:
+                payload = await self._gmgn_call(
+                    "/v1/market/token_kline",
+                    {
+                        "chain": gmgn_api_chain(chain),
+                        "address": address,
+                        "resolution": res,
+                        "from": str(start * 1000),
+                        "to": str(now * 1000),
+                    },
+                )
+                peak = ath_from_kline(payload, current_mcap, current_price, start)
+            if peak > 0:
+                break
+        chosen = max(existing, peak, current_mcap)
+        if chosen > 0:
+            token["athMarketCap"] = chosen
         return token
 
     async def _dexscreener(self, address: str, hint: str) -> dict[str, Any] | None:

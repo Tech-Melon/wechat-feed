@@ -58,8 +58,13 @@ _IDLE_GAP = 4.0
 _USER_ID = re.compile(r"^[A-Za-z0-9_@.\-]{1,80}$")
 
 
-async def _idle_ca_refresh(stop: asyncio.Event, cas: CaStore, tokens: TokenIndex) -> None:
-    """实时补全空闲时，用 search 刷新榜上的市值/ATH。CA 多时按热度分层，不跟实时抢配额。"""
+async def _idle_ca_refresh(
+    stop: asyncio.Event,
+    cas: CaStore,
+    tokens: TokenIndex,
+    store: SettingsStore,
+) -> None:
+    """实时补全空闲时，用 search 刷新榜上的市值/ATH。关掉排行榜就不打 GMGN。"""
     try:
         await asyncio.wait_for(stop.wait(), timeout=15)
         return
@@ -67,6 +72,9 @@ async def _idle_ca_refresh(stop: asyncio.Event, cas: CaStore, tokens: TokenIndex
         pass
     while not stop.is_set():
         try:
+            if not store.get().get("ca_board", True):
+                await asyncio.wait_for(stop.wait(), timeout=20)
+                continue
             if not tokens.has_key() or not tokens.idle():
                 await asyncio.wait_for(stop.wait(), timeout=8)
                 continue
@@ -153,7 +161,7 @@ def create_app() -> FastAPI:
             tasks.append(asyncio.create_task(backfill_history(store, hub, stop, direct)))
             tasks.append(asyncio.create_task(supervise(store, hub, stop, token_index, direct)))
         if os.environ.get("WECHAT_FEED_DISABLE_TOKEN") != "1":
-            tasks.append(asyncio.create_task(_idle_ca_refresh(stop, cas, token_index)))
+            tasks.append(asyncio.create_task(_idle_ca_refresh(stop, cas, token_index, store)))
         yield
         stop.set()
         for task in tasks:
@@ -589,7 +597,10 @@ def create_app() -> FastAPI:
 
     @app.get("/api/ca-board")
     def ca_board() -> dict[str, Any]:
-        return {"ok": True, "board": cas.board(), "stats": cas.stats()}
+        enabled = bool(store.get().get("ca_board", True))
+        if not enabled:
+            return {"ok": True, "enabled": False, "board": [], "stats": {}}
+        return {"ok": True, "enabled": True, "board": cas.board(), "stats": cas.stats()}
 
     @app.get("/api/ca-board/user/{user_id}")
     def ca_board_user(user_id: str) -> dict[str, Any]:

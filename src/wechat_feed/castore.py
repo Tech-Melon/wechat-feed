@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 KEEP_SECONDS = 365 * 24 * 3600
-WIN_X = 2.0
+WIN_X = 1.5
 # 超过一万倍当脏数据：历史回灌、错市值、单位错位都会出这种数。
 MAX_X = 10_000.0
 HOT_AGE = 6 * 3600
@@ -118,9 +118,29 @@ class CaStore:
             )
             """
         )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ca_group_firsts (
+                chain TEXT NOT NULL,
+                address TEXT NOT NULL,
+                group_id TEXT NOT NULL,
+                group_name TEXT,
+                caller_id TEXT,
+                caller_name TEXT,
+                card_id TEXT,
+                mcap REAL NOT NULL DEFAULT 0,
+                first_at INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (chain, address, group_id)
+            )
+            """
+        )
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_ca_calls_time ON ca_calls(called_at)")
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_ca_tokens_time ON ca_tokens(first_at)")
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ca_group_firsts_time ON ca_group_firsts(first_at)"
+        )
         self._ensure_columns()
+        self._backfill_group_firsts()
         self._conn.commit()
 
     def _ensure_columns(self) -> None:
@@ -130,6 +150,38 @@ class CaStore:
                 "ALTER TABLE ca_tokens ADD COLUMN refreshed_at INTEGER NOT NULL DEFAULT 0"
             )
 
+    def _backfill_group_firsts(self) -> None:
+        self._conn.execute(
+            """
+            INSERT OR IGNORE INTO ca_group_firsts (
+                chain, address, group_id, group_name, caller_id, caller_name,
+                card_id, mcap, first_at
+            )
+            SELECT chain, address, group_id, group_name, discoverer_id, discoverer_name,
+                   card_id, first_mcap, first_at
+            FROM ca_tokens
+            WHERE IFNULL(group_id, '') != '' AND first_mcap > 0
+            """
+        )
+        self._conn.execute(
+            """
+            INSERT OR IGNORE INTO ca_group_firsts (
+                chain, address, group_id, group_name, caller_id, caller_name,
+                card_id, mcap, first_at
+            )
+            SELECT c.chain, c.address, c.group_id, c.group_name, c.caller_id, c.caller_name,
+                   c.card_id, c.mcap, c.called_at
+            FROM ca_calls c
+            INNER JOIN (
+                SELECT chain, address, group_id, MIN(called_at) AS first_at
+                FROM ca_calls
+                WHERE IFNULL(group_id, '') != '' AND mcap > 0
+                GROUP BY chain, address, group_id
+            ) x ON x.chain = c.chain AND x.address = c.address
+               AND x.group_id = c.group_id AND x.first_at = c.called_at
+            """
+        )
+
     def cutoff(self) -> int:
         return int(time.time()) - KEEP_SECONDS
 
@@ -137,6 +189,9 @@ class CaStore:
         cut = self.cutoff()
         with self._lock:
             self._conn.execute("DELETE FROM ca_calls WHERE called_at > 0 AND called_at < ?", (cut,))
+            self._conn.execute(
+                "DELETE FROM ca_group_firsts WHERE first_at > 0 AND first_at < ?", (cut,)
+            )
             self._conn.execute("DELETE FROM ca_tokens WHERE first_at > 0 AND first_at < ?", (cut,))
             self._conn.commit()
 
@@ -155,6 +210,10 @@ class CaStore:
                         (row["chain"], row["address"]),
                     )
                     self._conn.execute(
+                        "DELETE FROM ca_group_firsts WHERE chain = ? AND address = ?",
+                        (row["chain"], row["address"]),
+                    )
+                    self._conn.execute(
                         "DELETE FROM ca_tokens WHERE chain = ? AND address = ?",
                         (row["chain"], row["address"]),
                     )
@@ -167,6 +226,14 @@ class CaStore:
                 DELETE FROM ca_calls WHERE NOT EXISTS (
                     SELECT 1 FROM ca_tokens t
                     WHERE t.chain = ca_calls.chain AND t.address = ca_calls.address
+                )
+                """
+            )
+            self._conn.execute(
+                """
+                DELETE FROM ca_group_firsts WHERE NOT EXISTS (
+                    SELECT 1 FROM ca_tokens t
+                    WHERE t.chain = ca_group_firsts.chain AND t.address = ca_group_firsts.address
                 )
                 """
             )
@@ -229,8 +296,20 @@ class CaStore:
                         mcap,
                         now,
                     )
+                if group_id and mcap > 0:
+                    self._upsert_group_first(
+                        chain,
+                        address,
+                        group_id,
+                        group_name,
+                        caller_id,
+                        caller_name,
+                        card_id,
+                        mcap,
+                        now,
+                    )
                 out.append(
-                    self._decorate(token, chain, address, card_id, caller_id, now)
+                    self._decorate(token, chain, address, card_id, caller_id, now, group_id)
                 )
             self._conn.commit()
         return out
@@ -360,6 +439,79 @@ class CaStore:
                 (mcap, caller_name, chain, address, caller_id),
             )
 
+    def _upsert_group_first(
+        self,
+        chain: str,
+        address: str,
+        group_id: str,
+        group_name: str,
+        caller_id: str,
+        caller_name: str,
+        card_id: str,
+        mcap: float,
+        now: int,
+    ) -> None:
+        row = self._conn.execute(
+            """
+            SELECT mcap FROM ca_group_firsts
+            WHERE chain = ? AND address = ? AND group_id = ?
+            """,
+            (chain, address, group_id),
+        ).fetchone()
+        if row is None:
+            if mcap <= 0:
+                return
+            self._conn.execute(
+                """
+                INSERT INTO ca_group_firsts (
+                    chain, address, group_id, group_name, caller_id, caller_name,
+                    card_id, mcap, first_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    chain,
+                    address,
+                    group_id,
+                    group_name,
+                    caller_id,
+                    caller_name,
+                    card_id,
+                    mcap,
+                    now,
+                ),
+            )
+            return
+        if _num(row["mcap"]) <= 0 and mcap > 0:
+            self._conn.execute(
+                """
+                UPDATE ca_group_firsts SET
+                    mcap = ?,
+                    caller_name = COALESCE(NULLIF(?, ''), caller_name),
+                    group_name = COALESCE(NULLIF(?, ''), group_name)
+                WHERE chain = ? AND address = ? AND group_id = ?
+                """,
+                (mcap, caller_name, group_name, chain, address, group_id),
+            )
+
+    @staticmethod
+    def _same_first(
+        card_id: str,
+        sender_id: str,
+        created_at: int,
+        found_card: str,
+        found_by: str,
+        found_at: int,
+    ) -> bool:
+        if card_id and found_card and card_id == found_card:
+            return True
+        return (
+            bool(sender_id)
+            and sender_id == found_by
+            and created_at > 0
+            and found_at > 0
+            and abs(created_at - found_at) <= 2
+        )
+
     def _decorate(
         self,
         token: dict[str, Any],
@@ -368,6 +520,7 @@ class CaStore:
         card_id: str = "",
         sender_id: str = "",
         created_at: int = 0,
+        group_id: str = "",
     ) -> dict[str, Any]:
         row = self._conn.execute(
             "SELECT * FROM ca_tokens WHERE chain = ? AND address = ?",
@@ -388,17 +541,57 @@ class CaStore:
         token["foundGroupId"] = row["group_id"] or ""
         token["foundAt"] = int(row["first_at"] or 0)
         token["foundCardId"] = row["card_id"] or ""
-        found_card = row["card_id"] or ""
-        found_by = row["discoverer_id"] or ""
-        found_at = int(row["first_at"] or 0)
-        same_card = bool(card_id) and card_id == found_card
-        same_first = (
-            bool(sender_id)
-            and sender_id == found_by
-            and created_at > 0
-            and abs(created_at - found_at) <= 2
+        token["isFirstCall"] = self._same_first(
+            card_id,
+            sender_id,
+            created_at,
+            row["card_id"] or "",
+            row["discoverer_id"] or "",
+            int(row["first_at"] or 0),
         )
-        token["isFirstCall"] = same_card or same_first
+        grow = None
+        if group_id:
+            grow = self._conn.execute(
+                """
+                SELECT * FROM ca_group_firsts
+                WHERE chain = ? AND address = ? AND group_id = ?
+                """,
+                (chain, address, group_id),
+            ).fetchone()
+        if grow is not None:
+            group_first = _num(grow["mcap"])
+            token["groupFirstMcap"] = group_first
+            token["groupFoundBy"] = grow["caller_name"] or ""
+            token["groupFoundById"] = grow["caller_id"] or ""
+            token["groupFoundGroup"] = grow["group_name"] or ""
+            token["groupFoundAt"] = int(grow["first_at"] or 0)
+            token["groupFoundCardId"] = grow["card_id"] or ""
+            token["groupNowX"] = (
+                (last / group_first) if group_first > 0 and last > 0 else 0.0
+            )
+            token["groupMaxX"] = (
+                (ath / group_first) if group_first > 0 and ath > 0 else 0.0
+            )
+            token["isGroupFirst"] = self._same_first(
+                card_id,
+                sender_id,
+                created_at,
+                grow["card_id"] or "",
+                grow["caller_id"] or "",
+                int(grow["first_at"] or 0),
+            )
+            token["sameGroupAsGlobal"] = group_id == (row["group_id"] or "")
+        else:
+            token["groupFirstMcap"] = 0.0
+            token["groupFoundBy"] = ""
+            token["groupFoundById"] = ""
+            token["groupFoundGroup"] = ""
+            token["groupFoundAt"] = 0
+            token["groupFoundCardId"] = ""
+            token["groupNowX"] = 0.0
+            token["groupMaxX"] = 0.0
+            token["isGroupFirst"] = False
+            token["sameGroupAsGlobal"] = False
         return token
 
     def decorate_card(self, card: dict[str, Any]) -> dict[str, Any]:
@@ -408,6 +601,7 @@ class CaStore:
         card_id = _text(card.get("id"))
         sender_id = _text(card.get("senderUsername"))
         created_at = int(card.get("createTime") or 0)
+        group_id = _text(card.get("conversationId"))
         with self._lock:
             card["tokenCards"] = [
                 self._decorate(
@@ -417,6 +611,7 @@ class CaStore:
                     card_id,
                     sender_id,
                     created_at,
+                    group_id,
                 )
                 if isinstance(token, dict) and _text(token.get("address"))
                 else token

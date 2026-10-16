@@ -504,15 +504,47 @@ body {
   white-space: nowrap;
 }
 .wf-debut {
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  height: 18px;
-  padding: 0 7px;
-  border-radius: 999px;
-  background: #fef3c7;
-  color: #b54708;
-  font-size: 11px;
+  gap: 8px;
+  margin: 0 0 8px;
+  padding: 7px 12px;
+  border-radius: 12px;
+  background: linear-gradient(90deg, #fff7ed, #ffedd5 60%, #fef3c7);
+  border: 1px solid #f5b942;
+  color: #9a3412;
+  font-size: 13px;
   font-weight: 800;
+  letter-spacing: .12em;
+}
+.wf-debut::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #f59e0b;
+  box-shadow: 0 0 0 3px rgba(245, 158, 11, .28);
+  flex: none;
+}
+.wf-token.is-debut { box-shadow: inset 0 0 0 1.5px #f5b942; }
+.wf-token.is-group-debut { box-shadow: inset 0 0 0 1.5px #2e90fa; }
+.wf-debut.is-group {
+  background: linear-gradient(90deg, #eff8ff, #d1e9ff);
+  border-color: #84caff;
+  color: #175cd3;
+}
+.wf-debut.is-group::before {
+  background: #2e90fa;
+  box-shadow: 0 0 0 3px rgba(46, 144, 250, .28);
+}
+.ca-call .wf-debut {
+  display: inline-flex;
+  margin: 0;
+  padding: 2px 10px;
+  height: 22px;
+  border-radius: 999px;
+  font-size: 12px;
+  letter-spacing: .06em;
 }
 .wf-discover-name {
   border: 0;
@@ -832,7 +864,9 @@ body {
 .wf-mcap.is-hot .wf-mcap-v { color: #b42318; }
 .wf-mcap.is-empty .wf-mcap-v { color: #98a2b3; font-size: 18px; font-weight: 600; }
 
-.wf-xbar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 8px; }
+.wf-xbar { display: grid; gap: 6px; margin-top: 8px; }
+.wf-xrow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.wf-xlab { color: #667085; font-size: 11px; font-weight: 800; letter-spacing: .04em; }
 .wf-xchip { display: inline-flex; align-items: center; gap: 4px; height: 22px; padding: 0 8px; border-radius: 999px; font-size: 12px; font-weight: 700; }
 .wf-xchip b { font-size: 13px; }
 .wf-xchip.now { background: #ecfdf3; color: #067647; }
@@ -862,6 +896,42 @@ body {
 }
 .wf-discover-meta { color: #667085; font-size: 12px; margin-top: 2px; }
 
+.ca-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 800;
+  color: #344054;
+  user-select: none;
+}
+.ca-switch input {
+  width: 36px;
+  height: 20px;
+  margin: 0;
+  appearance: none;
+  border-radius: 999px;
+  background: #d0d5dd;
+  position: relative;
+  cursor: pointer;
+}
+.ca-switch input::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  transition: left .15s;
+}
+.ca-switch input:checked { background: #111827; }
+.ca-switch input:checked::after { left: 18px; }
+.ca-strip.is-off .ca-strip-top,
+.ca-strip.is-off .ca-open { display: none; }
 .ca-strip {
   display: flex;
   align-items: center;
@@ -942,6 +1012,10 @@ body {
 }
 .ca-page-head strong { display: block; font-size: 18px; }
 .ca-page-head p { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+.ca-sub-item { display: inline-flex; align-items: baseline; gap: 4px; margin-right: 12px; }
+.ca-sub-item em { font-style: normal; font-size: 11px; font-weight: 700; color: #98a2b3; }
+.ca-sub-item b { font-size: 14px; color: #111827; }
+.ca-sub-item.win b { color: #067647; }
 .ca-back {
   height: 32px;
   padding: 0 12px;
@@ -962,7 +1036,22 @@ body {
   border: 1px solid #eef2f6;
   cursor: pointer;
 }
-.ca-person:nth-child(-n+3) { background: linear-gradient(90deg, #fff7ed, #fff); }
+.ca-main {
+  min-width: 0;
+  flex: 1;
+  display: grid;
+  gap: 6px;
+  align-content: center;
+}
+.ca-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+.ca-person[data-rank="1"] { background: linear-gradient(90deg, #fff9e8, #fff); }
+.ca-person[data-rank="2"] { background: linear-gradient(90deg, #f8fafc, #fff); }
+.ca-person[data-rank="3"] { background: linear-gradient(90deg, #fff7ed, #fff); }
 .ca-rank {
   width: 32px; height: 32px; border-radius: 10px;
   display: grid; place-items: center;
@@ -970,28 +1059,79 @@ body {
   background: #98a2b3;
   flex: none;
 }
-.ca-person[data-rank="1"] .ca-rank { background: linear-gradient(180deg, #f7b731, #d97706); }
-.ca-person[data-rank="2"] .ca-rank { background: linear-gradient(180deg, #cbd5e1, #64748b); }
-.ca-person[data-rank="3"] .ca-rank { background: linear-gradient(180deg, #fdba74, #c2410c); }
+.ca-medal { flex: none; display: block; overflow: visible; }
+.ca-medal .ring { fill: none; stroke-width: 1.6; }
+.ca-medal.gold .coin { fill: #f5c84c; }
+.ca-medal.gold .ring { stroke: #fff6d0; }
+.ca-medal.gold .star { fill: #fffbeb; }
+.ca-medal.gold .ribbon-l { fill: #e11d48; }
+.ca-medal.gold .ribbon-r { fill: #9f1239; }
+.ca-medal.silver .coin { fill: #c5ced8; }
+.ca-medal.silver .ring { stroke: #f8fafc; }
+.ca-medal.silver .star { fill: #fff; }
+.ca-medal.silver .ribbon-l { fill: #64748b; }
+.ca-medal.silver .ribbon-r { fill: #334155; }
+.ca-medal.bronze .coin { fill: #d0894b; }
+.ca-medal.bronze .ring { stroke: #fde7c7; }
+.ca-medal.bronze .star { fill: #fff7ed; }
+.ca-medal.bronze .ribbon-l { fill: #c2410c; }
+.ca-medal.bronze .ribbon-r { fill: #9a3412; }
+.ca-chip .ca-medal { width: 18px; height: 21px; }
 .ca-person .wf-avatar { width: 36px; height: 36px; flex: none; }
-.ca-who { min-width: 0; flex: 1; }
+.ca-who { min-width: 0; }
 .ca-who strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ca-who span { color: var(--muted); font-size: 12px; }
+.ca-pill.score { background: #fff9e8; color: #b45309; }
+.ca-pill.score .ca-k { color: #d97706; }
+.ca-person[data-rank="1"] .ca-pill.score { background: #fff3d0; }
 .ca-pills { display: flex; flex-wrap: wrap; gap: 6px; flex: none; }
 .ca-pill {
   display: inline-flex;
-  align-items: center;
-  height: 24px;
-  padding: 0 8px;
-  border-radius: 999px;
+  align-items: baseline;
+  gap: 4px;
+  height: auto;
+  padding: 4px 8px;
+  border-radius: 10px;
   background: #f2f4f7;
   color: #344054;
   font-size: 12px;
   font-weight: 700;
   white-space: nowrap;
 }
+.ca-k { font-size: 11px; font-weight: 700; color: #98a2b3; }
+.ca-pill b { font-size: 13px; color: inherit; }
 .ca-pill.win { background: #ecfdf3; color: #067647; }
+.ca-pill.win .ca-k { color: #12b76a; }
 .ca-pill.max { background: #fff7ed; color: #c2410c; }
+.ca-pill.max .ca-k { color: #f79009; }
+.ca-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  padding: 4px 0 2px;
+}
+.ca-seg {
+  display: inline-flex;
+  padding: 3px;
+  gap: 2px;
+  border-radius: 999px;
+  background: #f2f4f7;
+  border: 1px solid #e4e7ec;
+}
+.ca-seg button {
+  height: 28px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: #667085;
+  font: 700 12px inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ca-seg button.on { background: #111827; color: #fff; }
+.ca-filter-hint { margin: 0; color: var(--muted); font-size: 12px; }
 .ca-star {
   height: 32px; padding: 0 12px; border-radius: 999px;
   border: 1px solid #f6d6a8; background: #fff8eb; color: #b54708;
@@ -1010,6 +1150,7 @@ body {
 .ca-call-top { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .ca-call-top strong { font-size: 15px; }
 .ca-call-meta { color: var(--muted); font-size: 12px; }
+.ca-call-meta time { color: #344054; font-weight: 700; }
 .ca-call-x { display: flex; flex-wrap: wrap; gap: 6px; }
 .ca-userhead {
   display: flex;
@@ -1018,6 +1159,17 @@ body {
   padding: 4px 0 10px;
 }
 .ca-userhead .wf-avatar { width: 48px; height: 48px; font-size: 18px; }
+.ca-userhead .ca-who { flex: 1; display: grid; gap: 6px; }
+.ca-win-rule {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: #ecfdf3;
+  color: #067647;
+  font-size: 12px;
+  font-weight: 700;
+}
 body.is-board .paths,
 body.is-board .keybar,
 body.is-board .tools,
@@ -1025,7 +1177,7 @@ body.is-board .feed,
 body.is-board .more,
 body.is-board .ca-strip { display: none; }
 @media (max-width: 720px) {
-  .ca-pills { display: none; }
+  .ca-stats .ca-pill:not(.win):not(.score) { display: none; }
   .ca-strip-top { display: none; }
 }
 .wf-numfmt {

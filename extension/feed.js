@@ -360,6 +360,20 @@
     return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${clock}`;
   }
 
+  function formatDateTime(seconds) {
+    const time = Number(seconds) || 0;
+    if (!time) return "";
+    const date = new Date(time * 1000);
+    const pad = (value) => `${value}`.padStart(2, "0");
+    const clock = `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+    const md = `${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+    const now = new Date();
+    if (date.getFullYear() !== now.getFullYear()) {
+      return `${date.getFullYear()}-${md} ${clock}`;
+    }
+    return `${md} ${clock}`;
+  }
+
   function formatFresh(seconds, nowSec) {
     const time = Number(seconds) || 0;
     if (!time) return "";
@@ -521,8 +535,11 @@
         ? `$${escapeText(token.symbol)}`
         : "未知代币";
     const chain = token.chain ? chainBadge(token.chain) : "";
-    const debut = !isWallet && token.isFirstCall
-      ? `<span class="wf-debut">首发</span>`
+    const debutBits = [];
+    if (!isWallet && token.isFirstCall) debutBits.push("所有群首发");
+    if (!isWallet && token.isGroupFirst) debutBits.push("本群首发");
+    const debutBar = debutBits.length
+      ? `<div class="wf-debut${token.isFirstCall ? "" : " is-group"}" title="${token.isFirstCall ? "监控里第一次出现这个合约" : "这个群第一次出现这个合约"}">${escapeText(debutBits.join(" · "))}</div>`
       : "";
     const launch = token.launchpad
       ? `<span class="wf-tag">${escapeText(token.launchpad)}</span>`
@@ -554,34 +571,51 @@
     const created = formatCreated(token.createdAt);
     const nowX = formatX(token.nowX);
     const maxX = formatX(token.maxX);
+    const groupNowX = formatX(token.groupNowX);
+    const groupMaxX = formatX(token.groupMaxX);
     const firstCap = moneyHtml(token.firstMcap, "");
-    const xbar = (nowX || maxX)
-      ? `<div class="wf-xbar">
-           ${nowX ? `<span class="wf-xchip now">当前 <b>${nowX}</b></span>` : ""}
-           ${maxX ? `<span class="wf-xchip max">最高 <b>${maxX}</b></span>` : ""}
+    const groupFirstCap = moneyHtml(token.groupFirstMcap, "");
+    const showGroupX = !token.sameGroupAsGlobal && (groupNowX || groupMaxX);
+    const xrow = (label, cur, peak) => (cur || peak)
+      ? `<div class="wf-xrow">
+           <span class="wf-xlab">${escapeText(label)}</span>
+           ${cur ? `<span class="wf-xchip now">当前 <b>${cur}</b></span>` : ""}
+           ${peak ? `<span class="wf-xchip max">最高 <b>${peak}</b></span>` : ""}
          </div>`
       : "";
-    const foundName = token.foundBy || token.foundById || "";
-    const foundAv = token.foundById
-      ? `<div class="wf-avatar wf-discover-av" style="background:hsl(${hue(token.foundById)} 62% 46%)">${lazyImg(assetUrl(`/api/avatar?username=${encodeURIComponent(token.foundById)}`), "")}<span>${escapeText(initial(foundName))}</span></div>`
-      : (foundName ? `<div class="wf-avatar wf-discover-av" style="background:hsl(${hue(foundName)} 62% 46%)">${escapeText(initial(foundName))}</div>` : "");
-    const foundWhen = token.foundAt ? escapeText(formatCreated(token.foundAt) || formatTime(token.foundAt)) : "";
-    const foundWho = token.foundById
-      ? `<button type="button" class="wf-discover-name" data-ca-user="${escapeText(token.foundById)}">${escapeText(foundName || "未知")}</button>`
-      : `<strong>${escapeText(foundName || "未知")}</strong>`;
-    const discover = (!isWallet && !token.isFirstCall && (foundName || token.foundGroup))
-      ? `<div class="wf-discover">
-           ${foundAv}
+    const xbar = (nowX || maxX || showGroupX)
+      ? `<div class="wf-xbar">${xrow("所有群", nowX, maxX)}${showGroupX ? xrow("本群", groupNowX, groupMaxX) : ""}</div>`
+      : "";
+    const foundBlock = (kind, name, userId, group, capHtml, when) => {
+      if (!name && !group) return "";
+      const av = userId
+        ? `<div class="wf-avatar wf-discover-av" style="background:hsl(${hue(userId)} 62% 46%)">${lazyImg(assetUrl(`/api/avatar?username=${encodeURIComponent(userId)}`), "")}<span>${escapeText(initial(name))}</span></div>`
+        : (name ? `<div class="wf-avatar wf-discover-av" style="background:hsl(${hue(name)} 62% 46%)">${escapeText(initial(name))}</div>` : "");
+      const who = userId
+        ? `<button type="button" class="wf-discover-name" data-ca-user="${escapeText(userId)}">${escapeText(name || "未知")}</button>`
+        : `<strong>${escapeText(name || "未知")}</strong>`;
+      return `<div class="wf-discover${kind === "本群首发" ? " is-group" : ""}">
+           ${av}
            <div class="wf-discover-body">
-             <span class="wf-discover-k">首次发现</span>
+             <span class="wf-discover-k">${escapeText(kind)}</span>
              <div class="wf-discover-line">
-               ${foundWho}
-               ${token.foundGroup ? `<span class="wf-discover-g">${escapeText(token.foundGroup)}</span>` : ""}
+               ${who}
+               ${group ? `<span class="wf-discover-g">${escapeText(group)}</span>` : ""}
              </div>
-             <div class="wf-discover-meta">${firstCap ? `发现市值 ${firstCap}` : ""}${foundWhen ? `${firstCap ? " · " : ""}${foundWhen}` : ""}</div>
+             <div class="wf-discover-meta">${capHtml ? `发现市值 ${capHtml}` : ""}${when ? `${capHtml ? " · " : ""}${when}` : ""}</div>
            </div>
-         </div>`
-      : "";
+         </div>`;
+    };
+    const foundWhen = token.foundAt ? escapeText(formatCreated(token.foundAt) || formatTime(token.foundAt)) : "";
+    const groupWhen = token.groupFoundAt ? escapeText(formatCreated(token.groupFoundAt) || formatTime(token.groupFoundAt)) : "";
+    const discover = isWallet ? "" : [
+      (!token.isFirstCall && (token.foundBy || token.foundGroup))
+        ? foundBlock("所有群首发", token.foundBy || token.foundById, token.foundById, token.foundGroup, firstCap, foundWhen)
+        : "",
+      (!token.isGroupFirst && !token.sameGroupAsGlobal && (token.groupFoundBy || token.groupFoundGroup))
+        ? foundBlock("本群首发", token.groupFoundBy || token.groupFoundById, token.groupFoundById, token.groupFoundGroup, groupFirstCap, groupWhen)
+        : "",
+    ].join("");
     const note = token.note ? `<div class="wf-wallet-note">${escapeText(token.note)}</div>` : "";
     const tags = `${tax}${flags}${twitter}${website}${telegram}`;
     const fmt = numberFormat === "en" ? "en" : "cn";
@@ -608,13 +642,14 @@
       : tags
         ? `<div class="wf-token-tags">${tags}</div>`
         : "";
-    return `<div class="wf-token${isWallet ? " is-wallet" : ""}">
+    return `<div class="wf-token${isWallet ? " is-wallet" : ""}${!isWallet && (token.isFirstCall || token.isGroupFirst) ? " is-debut" : ""}${!isWallet && token.isGroupFirst && !token.isFirstCall ? " is-group-debut" : ""}">
+      ${debutBar}
       <div class="wf-token-top">
         ${headLogo}
         <div class="wf-token-id">
           <div class="wf-token-title">
             <strong>${symbol}</strong>
-            ${isWallet ? `<span class="wf-tag">钱包</span>` : ""}${chain}${debut}${launch}
+            ${isWallet ? `<span class="wf-tag">钱包</span>` : ""}${chain}${launch}
             <a class="wf-token-link" href="${escapeText(token.url || "#")}" target="_blank" rel="noreferrer">${isWallet ? "GMGN 钱包" : "GMGN"}</a>
           </div>
           ${token.name ? `<em>${escapeText(token.name)}</em>` : ""}
@@ -923,7 +958,13 @@
       .wf-head { display:flex; justify-content:space-between; gap:8px; align-items:flex-start; }
       .wf-head-right, .wf-stack-time { display:flex; align-items:center; gap:8px; color:var(--muted); font-size:12px; white-space:nowrap; }
       .wf-fresh { color:#e5484d; font-size:11px; font-weight:800; letter-spacing:.02em; white-space:nowrap; }
-      .wf-debut { display:inline-flex; align-items:center; height:18px; padding:0 7px; border-radius:999px; background:#fef3c7; color:#b54708; font-size:11px; font-weight:800; }
+      .wf-debut { display:flex; align-items:center; gap:8px; margin:0 0 8px; padding:7px 12px; border-radius:12px; background:linear-gradient(90deg,#fff7ed,#ffedd5 60%,#fef3c7); border:1px solid #f5b942; color:#9a3412; font-size:13px; font-weight:800; letter-spacing:.12em; }
+      .wf-debut::before { content:""; width:8px; height:8px; border-radius:50%; background:#f59e0b; box-shadow:0 0 0 3px rgba(245,158,11,.28); flex:none; }
+      .wf-token.is-debut { box-shadow:inset 0 0 0 1.5px #f5b942; }
+      .wf-token.is-group-debut { box-shadow:inset 0 0 0 1.5px #2e90fa; }
+      .wf-debut.is-group { background:linear-gradient(90deg,#eff8ff,#d1e9ff); border-color:#84caff; color:#175cd3; }
+      .wf-debut.is-group::before { background:#2e90fa; box-shadow:0 0 0 3px rgba(46,144,250,.28); }
+      .wf-xcard .wf-debut { margin:6px 0 4px; padding:5px 10px; font-size:12px; }
       .wf-discover-name { border:0; padding:0; background:transparent; font:inherit; font-weight:800; cursor:pointer; color:inherit; }
       .wf-discover-name:hover { color:#175cd3; }
       .wf-who { display:flex; flex-wrap:wrap; gap:6px; align-items:center; min-width:0; }
@@ -1019,7 +1060,9 @@
       .wf-mcap-head { display:flex; justify-content:space-between; align-items:center; gap:8px; }
       .wf-mcap-k { color:#667085; font-size:12px; font-weight:800; letter-spacing:.04em; }
       .wf-mcap-v { display:block; margin-top:4px; color:var(--ink); font-size:26px; font-weight:800; letter-spacing:-.03em; line-height:1.15; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-      .wf-xbar { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin-top:8px; }
+      .wf-xbar { display:grid; gap:6px; margin-top:8px; }
+      .wf-xrow { display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+      .wf-xlab { color:#667085; font-size:11px; font-weight:800; letter-spacing:.04em; }
       .wf-xchip { display:inline-flex; align-items:center; gap:4px; height:22px; padding:0 8px; border-radius:999px; font-size:12px; font-weight:700; }
       .wf-xchip b { font-size:13px; }
       .wf-xchip.now { background:#ecfdf3; color:#067647; }
@@ -1039,7 +1082,11 @@
       :host([data-theme="dark"]) .wf-discover { background:rgba(255,255,255,.04); border-color:rgba(255,255,255,.08); }
       :host([data-theme="dark"]) .wf-discover-g { background:rgba(46,144,250,.22); color:#b2ccff; }
       :host([data-theme="dark"]) .wf-fresh { color:#fda29b; }
-      :host([data-theme="dark"]) .wf-debut { background:rgba(247,144,9,.22); color:#fdb022; }
+      :host([data-theme="dark"]) .wf-debut { background:linear-gradient(90deg,rgba(247,144,9,.28),rgba(247,144,9,.12)); border-color:#d97706; color:#fdb022; }
+      :host([data-theme="dark"]) .wf-token.is-debut { box-shadow:inset 0 0 0 1.5px #d97706; }
+      :host([data-theme="dark"]) .wf-token.is-group-debut { box-shadow:inset 0 0 0 1.5px #2e90fa; }
+      :host([data-theme="dark"]) .wf-debut.is-group { background:rgba(46,144,250,.18); border-color:#2e90fa; color:#b2ccff; }
+      :host([data-theme="dark"]) .wf-xlab { color:#98a2b3; }
       .wf-metric-unit { margin-left:3px; font-size:.62em; font-weight:800; }
       .wf-mcap.is-blue { background:linear-gradient(180deg,#eff6ff,#fff); border-color:#b2ccff; }
       .wf-mcap.is-blue .wf-mcap-v { color:#175cd3; }
@@ -1230,6 +1277,7 @@
     logoSvg,
     escapeText,
     formatTime,
+    formatDateTime,
     formatFresh,
     tickFresh,
     startFreshTick,

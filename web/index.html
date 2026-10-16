@@ -8,7 +8,7 @@
     <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
     <link rel="icon" href="/assets/favicon.png" type="image/png" sizes="128x128" />
     <link rel="apple-touch-icon" href="/assets/favicon.png" />
-    <link rel="stylesheet" href="/assets/app.css?v=0.9.2" />
+    <link rel="stylesheet" href="/assets/app.css?v=0.9.8" />
   </head>
   <body>
     <header class="top">
@@ -82,6 +82,10 @@
     </div>
 
     <section class="ca-strip" id="ca-strip">
+      <label class="ca-switch" title="关闭后不再为排行榜请求 GMGN">
+        <input id="ca-board-on" type="checkbox" />
+        <span>排行榜</span>
+      </label>
       <button type="button" class="ca-strip-open" data-open-board>
         <strong>CA 发现榜</strong>
         <span id="ca-strip-count">还没有记录</span>
@@ -94,7 +98,7 @@
         <button type="button" class="ca-back" data-board-back>返回</button>
         <div>
           <strong id="ca-page-title">CA 发现榜</strong>
-          <p id="ca-page-sub">按喊单次数、胜率（ATH ≥ 2 倍该用户首次喊单市值）和平均倍数综合打分。</p>
+          <p id="ca-page-sub">按喊单次数、胜率和平均倍数综合打分 · 胜：ATH ≥ 1.5 倍（涨幅 50%）</p>
         </div>
       </header>
       <div id="ca-page-body" class="ca-page-body"></div>
@@ -143,7 +147,7 @@
       技术瓜群流 · 作者 <a href="https://x.com/0xTechMelon" target="_blank" rel="noreferrer">@0xTechMelon</a>
       · 更多产品见 <a href="https://docs.jishugua.top" target="_blank" rel="noreferrer">docs.jishugua.top</a>
     </footer>
-    <script src="/shared/feed.js?v=0.9.2"></script>
-    <script src="/assets/app.js?v=0.9.2"></script>
+    <script src="/shared/feed.js?v=0.9.8"></script>
+    <script src="/assets/app.js?v=0.9.8"></script>
   </body>
 </html>

@@ -48,6 +48,7 @@ def default_settings() -> dict[str, Any]:
         "ca_feed_groups": [],
         "gmgn_api_key": "",
         "mcap_format": "cn",
+        "ca_board": True,
     }
 
 
@@ -228,6 +229,10 @@ def normalize_settings(raw: dict[str, Any]) -> dict[str, Any]:
         if fmt not in {"cn", "en"}:
             raise ValueError("市值格式只能是 cn 或 en")
         merged["mcap_format"] = fmt
+    if "ca_board" in raw:
+        if not isinstance(raw["ca_board"], bool):
+            raise ValueError("CA 发现榜开关必须是布尔值")
+        merged["ca_board"] = raw["ca_board"]
     if "blocked_groups" in raw:
         merged["blocked_groups"] = _clean_id_list(raw["blocked_groups"], limit=200, label="屏蔽群")
     if "blocked_users" in raw:
@@ -282,6 +287,7 @@ def normalize_settings(raw: dict[str, Any]) -> dict[str, Any]:
         "ca_feed_groups",
         "gmgn_api_key",
         "mcap_format",
+        "ca_board",
     }
     if unknown:
         raise ValueError("含有不支持的配置项")

@@ -539,7 +539,7 @@
     return (card.tokenCards || [])
       .map(
         (token) =>
-          `${token.source || ""}:${token.marketCap || 0}:${token.liquidity || 0}:${token.holders || 0}:${token.nowX || 0}:${token.maxX || 0}:${token.foundById || ""}:${token.isFirstCall ? 1 : 0}`
+          `${token.source || ""}:${token.marketCap || 0}:${token.liquidity || 0}:${token.holders || 0}:${token.nowX || 0}:${token.maxX || 0}:${token.groupNowX || 0}:${token.foundById || ""}:${token.isFirstCall ? 1 : 0}:${token.isGroupFirst ? 1 : 0}`
       )
       .join(",");
   }
