@@ -1313,6 +1313,9 @@ def test_package_omits_local_data_and_api_key() -> None:
         if local_key:
             hits = [path for path in files if local_key.encode("utf-8") in path.read_bytes()]
             assert hits == []
+    manifest = json.loads((ROOT / "extension" / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["manifest_version"] == 3
+    assert manifest["version"]
     page = (ROOT / "extension" / "popup.html").read_text(encoding="utf-8")
     assert "卡片水印" not in page
     assert 'id="watermark"' not in page
