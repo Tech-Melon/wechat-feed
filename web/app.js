@@ -855,7 +855,7 @@ function renderUserPage(userId) {
         <strong>${symbol}</strong>
         ${first}
         ${win}
-        <span class="ca-pill"><span class="ca-k">链</span><b>${esc(item.chain || "")}</b></span>
+        ${window.WechatFeed.chainBadge ? window.WechatFeed.chainBadge(item.chain) : `<span class="ca-pill"><span class="ca-k">链</span><b>${esc(item.chain || "")}</b></span>`}
       </div>
       <div class="ca-call-x">
         <span class="ca-pill"><span class="ca-k">喊单市值</span><b>${esc(moneyText(item.callMcap))}</b></span>
@@ -876,8 +876,10 @@ function renderBoardPage() {
   const stats = state.boardStats || {};
   const starred = new Set(state.settings.starred_users || []);
   title.textContent = "CA 发现榜";
+  const hour = Number(stats.dailyHour);
+  const clock = Number.isFinite(hour) ? `${hour}:00` : "22:00";
   sub.innerHTML = stats.tokens
-    ? `${stats.users || rows.length} 人 · ${stats.tokens} 个 CA · <span class="ca-win-rule" title="相对该用户自己第一次喊到这个 CA 时的市值">胜：ATH ≥ 1.5 倍（涨幅 50%）</span>`
+    ? `${stats.users || rows.length} 人 · ${stats.tokens} 个 CA · <span class="ca-win-rule" title="相对该用户自己第一次喊到这个 CA 时的市值">胜：ATH ≥ 1.5 倍（涨幅 50%）</span> · ${clock} 后空闲结算当日 CA`
     : `按喊单次数、胜率和平均倍数综合打分 · <span class="ca-win-rule">胜：ATH ≥ 1.5 倍（涨幅 50%）</span>`;
   if (!rows.length) {
     box.innerHTML = `<p class="ca-empty">还没有 CA 发现记录。群里出现合约并查出市值后会记在这里。</p>`;

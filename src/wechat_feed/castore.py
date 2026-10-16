@@ -9,6 +9,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .tokens import peak_since
+
 KEEP_SECONDS = 365 * 24 * 3600
 WIN_X = 1.5
 # 超过一万倍当脏数据：历史回灌、错市值、单位错位都会出这种数。
@@ -18,6 +20,38 @@ WARM_AGE = 3 * 86400
 REFRESH_HOT = 15 * 60
 REFRESH_WARM = 2 * 3600
 REFRESH_COLD = 12 * 3600
+DAILY_HOUR = 22
+DAILY_RETRY = 10 * 60
+
+
+def local_day_start(now: int | None = None) -> int:
+    stamp = int(now or time.time())
+    local = time.localtime(stamp)
+    return int(
+        time.mktime(
+            (
+                local.tm_year,
+                local.tm_mon,
+                local.tm_mday,
+                0,
+                0,
+                0,
+                0,
+                0,
+                -1,
+            )
+        )
+    )
+
+
+def local_day_id(now: int | None = None) -> int:
+    local = time.localtime(int(now or time.time()))
+    return local.tm_year * 10000 + local.tm_mon * 100 + local.tm_mday
+
+
+def in_daily_window(now: int | None = None, hour: int = DAILY_HOUR) -> bool:
+    hour = min(23, max(0, int(hour)))
+    return time.localtime(int(now or time.time())).tm_hour >= hour
 
 
 def _num(value: Any) -> float:
@@ -148,6 +182,20 @@ class CaStore:
         if "refreshed_at" not in cols:
             self._conn.execute(
                 "ALTER TABLE ca_tokens ADD COLUMN refreshed_at INTEGER NOT NULL DEFAULT 0"
+            )
+        call_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(ca_calls)")}
+        if "ath_mcap" not in call_cols:
+            self._conn.execute(
+                "ALTER TABLE ca_calls ADD COLUMN ath_mcap REAL NOT NULL DEFAULT 0"
+            )
+        group_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(ca_group_firsts)")}
+        if "ath_mcap" not in group_cols:
+            self._conn.execute(
+                "ALTER TABLE ca_group_firsts ADD COLUMN ath_mcap REAL NOT NULL DEFAULT 0"
+            )
+        if "settled_day" not in cols:
+            self._conn.execute(
+                "ALTER TABLE ca_tokens ADD COLUMN settled_day INTEGER NOT NULL DEFAULT 0"
             )
 
     def _backfill_group_firsts(self) -> None:
@@ -342,7 +390,7 @@ class CaStore:
         symbol = _text(token.get("symbol"))
         name = _text(token.get("name"))
         if row is None:
-            if mcap <= 0 or not is_sane(mcap, ath, mcap):
+            if mcap <= 0 or not is_sane(mcap, mcap, mcap):
                 return
             self._conn.execute(
                 """
@@ -359,7 +407,7 @@ class CaStore:
                     symbol,
                     name,
                     mcap,
-                    max(ath, mcap),
+                    mcap,
                     mcap,
                     now,
                     now,
@@ -373,11 +421,11 @@ class CaStore:
             )
             return
         first_mcap = _num(row["first_mcap"])
-        if first_mcap <= 0 and mcap > 0 and is_sane(mcap, ath, mcap):
+        if first_mcap <= 0 and mcap > 0 and is_sane(mcap, mcap, mcap):
             first_mcap = mcap
         ath_mcap = _num(row["ath_mcap"])
-        if ath > 0 and (first_mcap <= 0 or ath / first_mcap <= MAX_X):
-            ath_mcap = max(ath_mcap, ath, mcap)
+        if mcap > 0 and (first_mcap <= 0 or mcap / first_mcap <= MAX_X):
+            ath_mcap = max(ath_mcap, mcap)
         last_mcap = _num(row["last_mcap"])
         if mcap > 0 and (first_mcap <= 0 or mcap / first_mcap <= MAX_X):
             last_mcap = mcap
@@ -416,8 +464,8 @@ class CaStore:
                 """
                 INSERT INTO ca_calls (
                     chain, address, caller_id, caller_name,
-                    group_id, group_name, card_id, mcap, called_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    group_id, group_name, card_id, mcap, called_at, ath_mcap
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     chain,
@@ -429,6 +477,7 @@ class CaStore:
                     card_id,
                     mcap,
                     now,
+                    mcap,
                 ),
             )
             return
@@ -465,8 +514,8 @@ class CaStore:
                 """
                 INSERT INTO ca_group_firsts (
                     chain, address, group_id, group_name, caller_id, caller_name,
-                    card_id, mcap, first_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    card_id, mcap, first_at, ath_mcap
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     chain,
@@ -478,6 +527,7 @@ class CaStore:
                     card_id,
                     mcap,
                     now,
+                    mcap,
                 ),
             )
             return
@@ -534,7 +584,8 @@ class CaStore:
         token["firstMcap"] = first
         token["athMarketCap"] = ath
         token["nowX"] = (last / first) if first > 0 and last > 0 else 0.0
-        token["maxX"] = (ath / first) if first > 0 and ath > 0 else 0.0
+        since_ath = ath if ath > 0 else last
+        token["maxX"] = (since_ath / first) if first > 0 and since_ath > 0 else 0.0
         token["foundBy"] = row["discoverer_name"] or ""
         token["foundById"] = row["discoverer_id"] or ""
         token["foundGroup"] = row["group_name"] or ""
@@ -569,8 +620,11 @@ class CaStore:
             token["groupNowX"] = (
                 (last / group_first) if group_first > 0 and last > 0 else 0.0
             )
+            group_ath = _num(grow["ath_mcap"] if "ath_mcap" in grow.keys() else 0)
+            if group_ath <= 0:
+                group_ath = last
             token["groupMaxX"] = (
-                (ath / group_first) if group_first > 0 and ath > 0 else 0.0
+                (group_ath / group_first) if group_first > 0 and group_ath > 0 else 0.0
             )
             token["isGroupFirst"] = self._same_first(
                 card_id,
@@ -626,10 +680,12 @@ class CaStore:
             if not ident:
                 continue
             first = _num(row["first_mcap"])
-            if not is_sane(first, row["ath_mcap"], row["last_mcap"]):
+            last = _num(row["last_mcap"])
+            if not is_sane(first, last, last):
                 continue
             call_mcap = _num(row["mcap"])
-            peak = max(_num(row["ath_mcap"]), _num(row["last_mcap"]))
+            call_ath = _num(row["call_ath"] if "call_ath" in row.keys() else 0)
+            peak = max(call_ath, last, call_mcap)
             multiple = _multiple(peak, call_mcap)
             item = buckets.setdefault(
                 ident,
@@ -681,7 +737,9 @@ class CaStore:
 
     def _call_join_sql(self) -> str:
         return """
-            SELECT c.caller_id, c.caller_name, c.mcap, t.ath_mcap, t.last_mcap, t.first_mcap
+            SELECT c.caller_id, c.caller_name, c.mcap,
+                   COALESCE(NULLIF(c.ath_mcap, 0), t.last_mcap) AS call_ath,
+                   t.last_mcap, t.first_mcap
             FROM ca_calls c
             JOIN ca_tokens t ON t.chain = c.chain AND t.address = c.address
             WHERE c.called_at >= ?
@@ -715,8 +773,8 @@ class CaStore:
             rows = self._conn.execute(
                 """
                 SELECT c.chain, c.address, c.caller_name, c.mcap, c.called_at,
-                       c.group_id, c.group_name, c.card_id,
-                       t.symbol, t.name, t.first_mcap, t.ath_mcap, t.last_mcap,
+                       c.group_id, c.group_name, c.card_id, c.ath_mcap AS call_ath,
+                       t.symbol, t.name, t.first_mcap, t.last_mcap,
                        t.discoverer_id, t.first_at
                 FROM ca_calls c
                 JOIN ca_tokens t ON t.chain = c.chain AND t.address = c.address
@@ -728,12 +786,12 @@ class CaStore:
         out: list[dict[str, Any]] = []
         for row in rows:
             first = _num(row["first_mcap"])
-            if not is_sane(first, row["ath_mcap"], row["last_mcap"]):
+            last = _num(row["last_mcap"])
+            if not is_sane(first, last, last):
                 continue
             call_mcap = _num(row["mcap"])
-            ath = _num(row["ath_mcap"])
-            last = _num(row["last_mcap"])
-            peak = max(ath, last)
+            ath = _num(row["call_ath"])
+            peak = max(ath, last, call_mcap)
             max_x = (peak / call_mcap) if call_mcap > 0 and peak > 0 else 0.0
             now_x = (last / call_mcap) if call_mcap > 0 and last > 0 else 0.0
             if max_x > MAX_X or now_x > MAX_X:
@@ -804,7 +862,7 @@ class CaStore:
             for min_last, max_last, max_refreshed in bands:
                 row = self._conn.execute(
                     """
-                    SELECT chain, address, last_at, refreshed_at, ath_mcap, first_mcap
+                    SELECT chain, address, last_at, refreshed_at, ath_mcap, first_mcap, first_at
                     FROM ca_tokens
                     WHERE first_mcap > 0
                       AND IFNULL(address, '') != ''
@@ -819,12 +877,40 @@ class CaStore:
                     return dict(row)
         return None
 
+    def next_daily(self, now: int | None = None) -> dict[str, Any] | None:
+        """当天喊过、尚未做日结算的代币，一次一条。"""
+        stamp = int(now or time.time())
+        start = local_day_start(stamp)
+        day_id = local_day_id(stamp)
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT t.chain, t.address, t.last_at, t.refreshed_at,
+                       t.ath_mcap, t.first_mcap, t.first_at
+                FROM ca_tokens t
+                WHERE t.first_mcap > 0
+                  AND IFNULL(t.address, '') != ''
+                  AND IFNULL(t.settled_day, 0) < ?
+                  AND t.refreshed_at < ?
+                  AND EXISTS (
+                    SELECT 1 FROM ca_calls c
+                    WHERE c.chain = t.chain AND c.address = t.address
+                      AND c.called_at >= ?
+                  )
+                ORDER BY t.last_at DESC
+                LIMIT 1
+                """,
+                (day_id, stamp - DAILY_RETRY, start),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
     def apply_quote(
         self,
         chain: str,
         address: str,
         quote: dict[str, Any] | None,
         now: int | None = None,
+        settle: bool = False,
     ) -> None:
         stamp = int(now or time.time())
         chain = _text(chain).lower() or "_"
@@ -834,7 +920,7 @@ class CaStore:
         with self._lock:
             row = self._conn.execute(
                 """
-                SELECT first_mcap, ath_mcap, last_mcap
+                SELECT first_mcap, ath_mcap, last_mcap, first_at
                 FROM ca_tokens WHERE chain = ? AND address = ?
                 """,
                 (chain, address),
@@ -844,21 +930,26 @@ class CaStore:
             first = _num(row["first_mcap"])
             ath = _num(row["ath_mcap"])
             last = _num(row["last_mcap"])
+            first_at = int(row["first_at"] or 0)
             symbol = ""
             name = ""
+            bars = _quote_bars(quote)
             if quote:
                 mcap = _num(quote.get("marketCap"))
-                new_ath = _num(quote.get("athMarketCap"))
                 symbol = _text(quote.get("symbol"))
                 name = _text(quote.get("name"))
                 if mcap > 0 and (first <= 0 or mcap / first <= MAX_X):
                     last = mcap
-                    if first <= 0 and is_sane(mcap, new_ath or mcap, mcap):
+                    if first <= 0 and is_sane(mcap, mcap, mcap):
                         first = mcap
-                if new_ath > 0 and (first <= 0 or new_ath / first <= MAX_X):
-                    ath = max(ath, new_ath, last)
-                elif last > ath:
-                    ath = last
+                if last > 0 and (first <= 0 or last / first <= MAX_X):
+                    ath = max(ath, last)
+            if bars:
+                since_ath = peak_since(bars, first_at)
+                if since_ath > 0 and (first <= 0 or since_ath / first <= MAX_X):
+                    ath = max(since_ath, last)
+                self._apply_since_ath(chain, address, bars, last)
+            settled = local_day_id(stamp) if settle else None
             self._conn.execute(
                 """
                 UPDATE ca_tokens SET
@@ -867,12 +958,56 @@ class CaStore:
                     first_mcap = ?,
                     ath_mcap = ?,
                     last_mcap = ?,
-                    refreshed_at = ?
+                    refreshed_at = ?,
+                    settled_day = COALESCE(?, settled_day)
                 WHERE chain = ? AND address = ?
                 """,
-                (symbol, name, first, ath, last, stamp, chain, address),
+                (symbol, name, first, ath, last, stamp, settled, chain, address),
             )
             self._conn.commit()
+
+    def _apply_since_ath(
+        self,
+        chain: str,
+        address: str,
+        bars: list[tuple[int, float]],
+        last: float,
+    ) -> None:
+        """一份全局 K 线，按各用户/各群的喊单时间切片算 ATH，不再为每个群打接口。"""
+        for call in self._conn.execute(
+            "SELECT caller_id, called_at, mcap FROM ca_calls WHERE chain = ? AND address = ?",
+            (chain, address),
+        ).fetchall():
+            peak = peak_since(bars, int(call["called_at"] or 0))
+            if peak <= 0:
+                peak = last
+            call_mcap = _num(call["mcap"])
+            if call_mcap > 0 and peak / call_mcap > MAX_X:
+                continue
+            self._conn.execute(
+                """
+                UPDATE ca_calls SET ath_mcap = ?
+                WHERE chain = ? AND address = ? AND caller_id = ?
+                """,
+                (peak, chain, address, call["caller_id"]),
+            )
+        for group in self._conn.execute(
+            "SELECT group_id, first_at, mcap FROM ca_group_firsts WHERE chain = ? AND address = ?",
+            (chain, address),
+        ).fetchall():
+            peak = peak_since(bars, int(group["first_at"] or 0))
+            if peak <= 0:
+                peak = last
+            base = _num(group["mcap"])
+            if base > 0 and peak / base > MAX_X:
+                continue
+            self._conn.execute(
+                """
+                UPDATE ca_group_firsts SET ath_mcap = ?
+                WHERE chain = ? AND address = ? AND group_id = ?
+                """,
+                (peak, chain, address, group["group_id"]),
+            )
 
     def stats(self) -> dict[str, Any]:
         stamp = int(time.time())
@@ -912,10 +1047,52 @@ class CaStore:
                         (min_last, max_last, max_refreshed),
                     ).fetchone()[0]
                 )
+            start = local_day_start(stamp)
+            day_id = local_day_id(stamp)
+            daily_due = int(
+                self._conn.execute(
+                    """
+                    SELECT COUNT(*) FROM ca_tokens t
+                    WHERE t.first_mcap > 0 AND IFNULL(t.address, '') != ''
+                      AND IFNULL(t.settled_day, 0) < ?
+                      AND EXISTS (
+                        SELECT 1 FROM ca_calls c
+                        WHERE c.chain = t.chain AND c.address = t.address
+                          AND c.called_at >= ?
+                      )
+                    """,
+                    (day_id, start),
+                ).fetchone()[0]
+            )
         return {
             "tokens": tokens,
             "calls": calls,
             "users": users,
             "stale": stale,
             "lastRefresh": last_refresh,
+            "dailyDue": daily_due,
+            "dailyHour": DAILY_HOUR,
         }
+
+
+def _quote_bars(quote: dict[str, Any] | None) -> list[tuple[int, float]]:
+    if not quote:
+        return []
+    raw = quote.get("klineBars")
+    if not isinstance(raw, list):
+        return []
+    out: list[tuple[int, float]] = []
+    for item in raw:
+        try:
+            if isinstance(item, (list, tuple)) and len(item) >= 2:
+                out.append((int(item[0] or 0), float(item[1] or 0)))
+            elif isinstance(item, dict):
+                out.append(
+                    (
+                        int(item.get("t") or item.get("time") or 0),
+                        float(item.get("mcap") or item.get("v") or 0),
+                    )
+                )
+        except (TypeError, ValueError):
+            continue
+    return [(t, v) for t, v in out if v > 0]

@@ -1149,6 +1149,7 @@ body {
 }
 .ca-call-top { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .ca-call-top strong { font-size: 15px; }
+.ca-call-top .wf-chain { height: 24px; font-size: 12px; }
 .ca-call-meta { color: var(--muted); font-size: 12px; }
 .ca-call-meta time { color: #344054; font-weight: 700; }
 .ca-call-x { display: flex; flex-wrap: wrap; gap: 6px; }

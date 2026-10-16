@@ -576,15 +576,15 @@
     const firstCap = moneyHtml(token.firstMcap, "");
     const groupFirstCap = moneyHtml(token.groupFirstMcap, "");
     const showGroupX = !token.sameGroupAsGlobal && (groupNowX || groupMaxX);
-    const xrow = (label, cur, peak) => (cur || peak)
+    const xrow = (label, cur, peak, hint) => (cur || peak)
       ? `<div class="wf-xrow">
            <span class="wf-xlab">${escapeText(label)}</span>
            ${cur ? `<span class="wf-xchip now">当前 <b>${cur}</b></span>` : ""}
-           ${peak ? `<span class="wf-xchip max">最高 <b>${peak}</b></span>` : ""}
+           ${peak ? `<span class="wf-xchip max" title="${escapeText(hint || "")}">最高 <b>${peak}</b></span>` : ""}
          </div>`
       : "";
     const xbar = (nowX || maxX || showGroupX)
-      ? `<div class="wf-xbar">${xrow("所有群", nowX, maxX)}${showGroupX ? xrow("本群", groupNowX, groupMaxX) : ""}</div>`
+      ? `<div class="wf-xbar">${xrow("所有群", nowX, maxX, "自所有群首发之后的最高")}${showGroupX ? xrow("本群", groupNowX, groupMaxX, "自本群首发之后的最高") : ""}</div>`
       : "";
     const foundBlock = (kind, name, userId, group, capHtml, when) => {
       if (!name && !group) return "";
@@ -1272,6 +1272,7 @@
     setNumberFormat,
     numberFormat: currentNumberFormat,
     formatUsd,
+    chainBadge,
     setApiBase,
     stackMeta,
     logoSvg,

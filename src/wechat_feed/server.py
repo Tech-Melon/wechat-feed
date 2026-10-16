@@ -19,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
 from . import http as feed_http
-from .castore import CaStore
+from .castore import CaStore, in_daily_window, local_day_id
 from .config import (
     SettingsStore,
     data_dir,
@@ -55,7 +55,9 @@ _LISTEN_HOST = "127.0.0.1"
 _LISTEN_PORT = 8765
 _PAGE_SIZE = 30
 _IDLE_GAP = 4.0
+_DAILY_GAP = 6.0
 _USER_ID = re.compile(r"^[A-Za-z0-9_@.\-]{1,80}$")
+_DAILY_LOG_DAY = 0
 
 
 async def _idle_ca_refresh(
@@ -64,7 +66,8 @@ async def _idle_ca_refresh(
     tokens: TokenIndex,
     store: SettingsStore,
 ) -> None:
-    """实时补全空闲时，用 search 刷新榜上的市值/ATH。关掉排行榜就不打 GMGN。"""
+    """空闲时刷榜。每天设定时刻后优先结算当日喊过的 CA，间隔拉长以免顶满限频。"""
+    global _DAILY_LOG_DAY
     try:
         await asyncio.wait_for(stop.wait(), timeout=15)
         return
@@ -72,19 +75,42 @@ async def _idle_ca_refresh(
         pass
     while not stop.is_set():
         try:
-            if not store.get().get("ca_board", True):
+            settings = store.get()
+            if not settings.get("ca_board", True):
                 await asyncio.wait_for(stop.wait(), timeout=20)
                 continue
             if not tokens.has_key() or not tokens.idle():
                 await asyncio.wait_for(stop.wait(), timeout=8)
                 continue
-            row = cas.next_stale()
+            now = int(time.time())
+            hour = int(settings.get("ca_daily_hour") or 22)
+            settle = in_daily_window(now, hour)
+            row = cas.next_daily(now) if settle else None
+            if row is not None:
+                day_id = local_day_id(now)
+                if _DAILY_LOG_DAY != day_id:
+                    logger.info("开始结算当日 CA（{} 点后空闲排队）", hour)
+                    _DAILY_LOG_DAY = day_id
+                gap = _DAILY_GAP
+            else:
+                row = cas.next_stale(now)
+                settle = False
+                gap = _IDLE_GAP
             if row is None:
                 await asyncio.wait_for(stop.wait(), timeout=20)
                 continue
-            quote = await tokens.quote(str(row.get("address") or ""), str(row.get("chain") or ""))
-            cas.apply_quote(str(row.get("chain") or ""), str(row.get("address") or ""), quote)
-            await asyncio.sleep(_IDLE_GAP)
+            quote = await tokens.quote(
+                str(row.get("address") or ""),
+                str(row.get("chain") or ""),
+                since=int(row.get("first_at") or 0),
+            )
+            cas.apply_quote(
+                str(row.get("chain") or ""),
+                str(row.get("address") or ""),
+                quote,
+                settle=settle,
+            )
+            await asyncio.sleep(gap)
         except TimeoutError:
             continue
         except asyncio.CancelledError:
@@ -600,7 +626,9 @@ def create_app() -> FastAPI:
         enabled = bool(store.get().get("ca_board", True))
         if not enabled:
             return {"ok": True, "enabled": False, "board": [], "stats": {}}
-        return {"ok": True, "enabled": True, "board": cas.board(), "stats": cas.stats()}
+        stats = cas.stats()
+        stats["dailyHour"] = int(store.get().get("ca_daily_hour") or 22)
+        return {"ok": True, "enabled": True, "board": cas.board(), "stats": stats}
 
     @app.get("/api/ca-board/user/{user_id}")
     def ca_board_user(user_id: str) -> dict[str, Any]:

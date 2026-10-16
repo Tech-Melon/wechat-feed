@@ -3,7 +3,13 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from wechat_feed.castore import CaStore, format_x, wilson_lower
+from wechat_feed.castore import (
+    CaStore,
+    format_x,
+    in_daily_window,
+    local_day_start,
+    wilson_lower,
+)
 from wechat_feed.config import (
     SettingsStore,
     display_group_ids,
@@ -29,6 +35,7 @@ from wechat_feed.tokens import (
     gmgn_token_url,
     kline_resolution,
     parse_search,
+    peak_since,
 )
 from wechat_feed.upstream import _allowed, _stream_urls, parse_sse_block
 from wechat_feed.wechatdb import decode_content, parse_row, room_nicknames, strip_sender, table_name
@@ -186,6 +193,7 @@ def test_api_defaults_and_two_paths(client: TestClient) -> None:
     assert settings.json()["groups"] == []
     assert settings.json()["mcap_format"] == "cn"
     assert settings.json()["ca_board"] is True
+    assert settings.json()["ca_daily_hour"] == 22
     patched = client.put("/api/settings", json={"mcap_format": "en"})
     assert patched.status_code == 200
     assert patched.json()["mcap_format"] == "en"
@@ -362,6 +370,8 @@ def test_candidate_chains_prefers_dex_then_kind() -> None:
         current_mcap=10_000,
         current_price=0.001,
     ) == 50_000
+    assert peak_since([(100, 10), (200, 50), (300, 20)], 200) == 50
+    assert peak_since([(100, 10), (200, 50), (300, 20)], 250) == 20
 
 
 def test_ca_store_tracks_first_call_and_board(tmp_path: Path) -> None:
@@ -420,14 +430,14 @@ def test_ca_store_tracks_first_call_and_board(tmp_path: Path) -> None:
     assert again[0]["foundBy"] == "大白"
     assert again[0]["foundById"] == "wxid_a"
     assert again[0]["isFirstCall"] is True
-    assert again[0]["maxX"] == 8
+    assert again[0]["maxX"] == 4
     assert again[0]["nowX"] == 4
     board = store.board()
     by_id = {row["userId"]: row for row in board}
     assert by_id["wxid_a"]["calls"] == 1
     assert by_id["wxid_b"]["calls"] == 1
     assert by_id["wxid_a"]["wins"] == 1
-    assert by_id["wxid_b"]["wins"] == 1
+    assert by_id["wxid_b"]["wins"] == 0
     other = store.remember(
         {
             "id": "c3",
@@ -445,9 +455,43 @@ def test_ca_store_tracks_first_call_and_board(tmp_path: Path) -> None:
     assert other[0]["foundBy"] == "大白"
     assert other[0]["groupFoundBy"] == "Flyhoo"
     assert other[0]["nowX"] == 4
-    assert other[0]["maxX"] == 8
+    assert other[0]["maxX"] == 4
     assert other[0]["groupNowX"] == 1
-    assert other[0]["groupMaxX"] == 2
+    assert other[0]["groupMaxX"] == 1
+    store.apply_quote(
+        "bsc",
+        address,
+        {
+            "marketCap": 4000,
+            "klineBars": [
+                [1_800_000_000, 1000],
+                [1_800_000_050, 8000],
+                [1_800_000_150, 6000],
+                [1_800_000_200, 4000],
+            ],
+        },
+        now=1_800_000_200,
+    )
+    after_kline = store.decorate_card(
+        {
+            **first,
+            "tokenCards": [{"address": address, "chain": "bsc"}],
+        }
+    )
+    assert after_kline["tokenCards"][0]["maxX"] == 8
+    assert after_kline["tokenCards"][0]["nowX"] == 4
+    yy = store.decorate_card(
+        {
+            "id": "c3",
+            "senderUsername": "wxid_c",
+            "conversationId": "87654321@chatroom",
+            "createTime": 1_800_000_200,
+            "tokenCards": [{"address": address, "chain": "bsc"}],
+        }
+    )
+    assert yy["tokenCards"][0]["groupMaxX"] == 1
+    by_id = {row["userId"]: row for row in store.board()}
+    assert by_id["wxid_b"]["wins"] == 1
     later = store.decorate_card(
         {
             "id": "c4",
@@ -474,7 +518,15 @@ def test_ca_store_tracks_first_call_and_board(tmp_path: Path) -> None:
     store._conn.commit()
     stale = store.next_stale(now=1_800_000_200)
     assert stale is not None
-    store.apply_quote("bsc", address, {"marketCap": 2000, "athMarketCap": 9000}, now=1_800_000_200)
+    store.apply_quote(
+        "bsc",
+        address,
+        {
+            "marketCap": 2000,
+            "klineBars": [[1_800_000_000, 9000], [1_800_000_200, 2000]],
+        },
+        now=1_800_000_200,
+    )
     decorated = store.decorate_card(
         {
             "id": "c2",
@@ -492,6 +544,39 @@ def test_ca_store_tracks_first_call_and_board(tmp_path: Path) -> None:
         }
     )
     assert first_again["tokenCards"][0]["isFirstCall"] is True
+
+
+def test_daily_settle_queue(tmp_path: Path) -> None:
+    store = CaStore(tmp_path / "ca.db")
+    now = int(__import__("time").time())
+    start = local_day_start(now)
+    address = "0x" + "cd" * 20
+    store.remember(
+        {
+            "id": "d1",
+            "senderUsername": "wxid_z",
+            "senderName": "测",
+            "conversationId": "11111111111@chatroom",
+            "conversationName": "测群",
+            "createTime": start + 3600,
+        },
+        [{"address": address, "chain": "bsc", "marketCap": 1000}],
+    )
+    evening = start + 22 * 3600 + 120
+    due = store.next_daily(now=evening)
+    assert due is not None
+    assert due["address"] == address
+    store.apply_quote(
+        "bsc",
+        address,
+        {"marketCap": 1100, "klineBars": [[start + 3600, 1100]]},
+        now=evening,
+        settle=True,
+    )
+    assert store.next_daily(now=evening) is None
+    assert in_daily_window(evening, 22)
+    morning = start + 10 * 3600
+    assert not in_daily_window(morning, 22)
 
 
 def test_card_store_round_trip(tmp_path: Path) -> None:
@@ -1266,6 +1351,7 @@ def test_package_omits_local_data_and_api_key() -> None:
     assert "wf-metrics" in feed
     assert "wf-ca-addr" in feed
     assert "function chainBadge" in feed
+    assert "chainBadge," in feed
     assert "function restoreHref" in feed
     assert "function formatUsd" in feed
     assert "wf-mcap" in feed
@@ -1282,6 +1368,7 @@ def test_package_omits_local_data_and_api_key() -> None:
     assert "await reloadFeeds()" in app_js
     assert "function setListenUsers" in app_js
     assert "function renderBoard" in app_js
+    assert "WechatFeed.chainBadge" in app_js
     assert "function medalSvg" in app_js
     assert "function filterUserCalls" in app_js
     assert "function sortUserCalls" in app_js
@@ -1291,6 +1378,21 @@ def test_package_omits_local_data_and_api_key() -> None:
     assert "function formatDateTime" in feed
     assert "force=True" in (ROOT / "src" / "wechat_feed" / "tokens.py").read_text(encoding="utf-8")
     assert "ca-pill score" in app_js
+    assert "peak_since" in (ROOT / "src" / "wechat_feed" / "tokens.py").read_text(
+        encoding="utf-8"
+    )
+    assert "klineBars" in (ROOT / "src" / "wechat_feed" / "castore.py").read_text(
+        encoding="utf-8"
+    )
+    assert "next_daily" in (ROOT / "src" / "wechat_feed" / "castore.py").read_text(
+        encoding="utf-8"
+    )
+    assert "since=since" in (ROOT / "src" / "wechat_feed" / "tokens.py").read_text(
+        encoding="utf-8"
+    )
+    assert "_KLINE_FALLBACK" in (ROOT / "src" / "wechat_feed" / "tokens.py").read_text(
+        encoding="utf-8"
+    )
     castore_py = (ROOT / "src" / "wechat_feed" / "castore.py").read_text(encoding="utf-8")
     assert "WIN_X = 1.5" in castore_py
     assert "涨幅 50%" in app_js
