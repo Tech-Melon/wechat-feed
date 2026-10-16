@@ -509,10 +509,11 @@ def _num(value: Any, default: float = 0.0) -> float:
 
 
 _KLINE_FALLBACK = {"1m": "5m", "5m": "1h", "1h": "4h", "4h": "1d"}
+_KLINE_SPAN = {"1m": 60, "5m": 300, "1h": 3600, "4h": 14400, "1d": 86400}
 
 
 def kline_resolution(created_at: int, now: int | None = None) -> str:
-    """按首次发现到现在的时长选周期（对齐 Ave：越新越细）。"""
+    """按首次发现到现在的时长选周期。3 天内用 4h，避免日线开盘早于喊单被整根丢掉。"""
     stamp = int(now or time.time())
     age = max(0, stamp - int(created_at or 0)) if created_at else 7 * 86400
     if age < 600:
@@ -521,7 +522,7 @@ def kline_resolution(created_at: int, now: int | None = None) -> str:
         return "5m"
     if age < 43200:
         return "1h"
-    if age < 86400:
+    if age < 3 * 86400:
         return "4h"
     return "1d"
 
@@ -576,15 +577,22 @@ def kline_bars(
     return out
 
 
-def peak_since(bars: list[tuple[int, float]], since_ts: int = 0) -> float:
-    """用户喊单时间起的最高市值，不含喊单之前的历史顶。"""
+def peak_since(
+    bars: list[tuple[int, float]],
+    since_ts: int = 0,
+    interval_s: int = 0,
+) -> float:
+    """喊单之后的最高。柱开盘早于喊单、但收盘盖住喊单的那根也算（否则日线/4h 会漏掉当根高峰）。"""
     peak = 0.0
     since = int(since_ts or 0)
+    span = int(interval_s or 0)
     for bar_time, value in bars:
         if value <= 0:
             continue
-        if since and bar_time and bar_time < since:
-            continue
+        if since and bar_time:
+            end = bar_time + span if span else bar_time
+            if end < since:
+                continue
         peak = max(peak, value)
     return peak
 
@@ -1046,8 +1054,8 @@ class TokenIndex:
                 "chain": gmgn_api_chain(chain),
                 "address": address,
                 "resolution": resolution,
-                "from": str(start),
-                "to": str(now),
+                "from": str(start * 1000),
+                "to": str(now * 1000),
             },
         )
         bars = kline_bars(payload, current_mcap, current_price)
@@ -1059,8 +1067,8 @@ class TokenIndex:
                 "chain": gmgn_api_chain(chain),
                 "address": address,
                 "resolution": resolution,
-                "from": str(start * 1000),
-                "to": str(now * 1000),
+                "from": str(start),
+                "to": str(now),
             },
         )
         return kline_bars(payload, current_mcap, current_price)
@@ -1083,18 +1091,23 @@ class TokenIndex:
         now = int(time.time())
         start = int(since or 0) or (created if created > 0 else now - 180 * 86400)
         resolution = kline_resolution(start, now)
+        span = _KLINE_SPAN.get(resolution, 0)
+        fetch_from = max(0, start - span)
         current_mcap = _num(token.get("marketCap"))
         current_price = _num(token.get("priceUsd") or token.get("price"))
         bars = await self._kline_fetch(
-            chain, address, resolution, start, now, current_mcap, current_price
+            chain, address, resolution, fetch_from, now, current_mcap, current_price
         )
         fallback = _KLINE_FALLBACK.get(resolution)
         if not bars and fallback:
+            span = _KLINE_SPAN.get(fallback, span)
+            fetch_from = max(0, start - span)
             bars = await self._kline_fetch(
-                chain, address, fallback, start, now, current_mcap, current_price
+                chain, address, fallback, fetch_from, now, current_mcap, current_price
             )
         token["klineBars"] = bars
-        peak = peak_since(bars, start)
+        token["klineInterval"] = span
+        peak = peak_since(bars, start, span)
         if force:
             chosen = max(peak, current_mcap)
         else:

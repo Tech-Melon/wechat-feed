@@ -372,6 +372,7 @@ def test_candidate_chains_prefers_dex_then_kind() -> None:
     ) == 50_000
     assert peak_since([(100, 10), (200, 50), (300, 20)], 200) == 50
     assert peak_since([(100, 10), (200, 50), (300, 20)], 250) == 20
+    assert peak_since([(100, 10), (200, 50), (300, 20)], 250, 100) == 50
 
 
 def test_ca_store_tracks_first_call_and_board(tmp_path: Path) -> None:
@@ -1368,6 +1369,10 @@ def test_package_omits_local_data_and_api_key() -> None:
     assert "await reloadFeeds()" in app_js
     assert "function setListenUsers" in app_js
     assert "function renderBoard" in app_js
+    assert "ca-board" in app_js
+    assert "notify_board" in (ROOT / "src" / "wechat_feed" / "hub.py").read_text(
+        encoding="utf-8"
+    )
     assert "WechatFeed.chainBadge" in app_js
     assert "function medalSvg" in app_js
     assert "function filterUserCalls" in app_js

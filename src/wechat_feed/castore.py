@@ -684,6 +684,7 @@ class CaStore:
             if not is_sane(first, last, last):
                 continue
             call_mcap = _num(row["mcap"])
+            # 榜用喊单后的 K 线高点；还没刷到 K 线时用现市值，不用 GMGN 历史总 ATH。
             call_ath = _num(row["call_ath"] if "call_ath" in row.keys() else 0)
             peak = max(call_ath, last, call_mcap)
             multiple = _multiple(peak, call_mcap)
@@ -945,10 +946,11 @@ class CaStore:
                 if last > 0 and (first <= 0 or last / first <= MAX_X):
                     ath = max(ath, last)
             if bars:
-                since_ath = peak_since(bars, first_at)
+                interval = int((quote or {}).get("klineInterval") or 0)
+                since_ath = peak_since(bars, first_at, interval)
                 if since_ath > 0 and (first <= 0 or since_ath / first <= MAX_X):
                     ath = max(since_ath, last)
-                self._apply_since_ath(chain, address, bars, last)
+                self._apply_since_ath(chain, address, bars, last, interval)
             settled = local_day_id(stamp) if settle else None
             self._conn.execute(
                 """
@@ -972,13 +974,14 @@ class CaStore:
         address: str,
         bars: list[tuple[int, float]],
         last: float,
+        interval_s: int = 0,
     ) -> None:
         """一份全局 K 线，按各用户/各群的喊单时间切片算 ATH，不再为每个群打接口。"""
         for call in self._conn.execute(
             "SELECT caller_id, called_at, mcap FROM ca_calls WHERE chain = ? AND address = ?",
             (chain, address),
         ).fetchall():
-            peak = peak_since(bars, int(call["called_at"] or 0))
+            peak = peak_since(bars, int(call["called_at"] or 0), interval_s)
             if peak <= 0:
                 peak = last
             call_mcap = _num(call["mcap"])
@@ -995,7 +998,7 @@ class CaStore:
             "SELECT group_id, first_at, mcap FROM ca_group_firsts WHERE chain = ? AND address = ?",
             (chain, address),
         ).fetchall():
-            peak = peak_since(bars, int(group["first_at"] or 0))
+            peak = peak_since(bars, int(group["first_at"] or 0), interval_s)
             if peak <= 0:
                 peak = last
             base = _num(group["mcap"])

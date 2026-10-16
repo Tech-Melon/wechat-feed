@@ -54,8 +54,8 @@ _AVATAR_CACHE = "private, max-age=86400"
 _LISTEN_HOST = "127.0.0.1"
 _LISTEN_PORT = 8765
 _PAGE_SIZE = 30
-_IDLE_GAP = 4.0
-_DAILY_GAP = 6.0
+_IDLE_GAP = 6.0
+_DAILY_GAP = 8.0
 _USER_ID = re.compile(r"^[A-Za-z0-9_@.\-]{1,80}$")
 _DAILY_LOG_DAY = 0
 
@@ -65,6 +65,7 @@ async def _idle_ca_refresh(
     cas: CaStore,
     tokens: TokenIndex,
     store: SettingsStore,
+    hub: Hub,
 ) -> None:
     """空闲时刷榜。每天设定时刻后优先结算当日喊过的 CA，间隔拉长以免顶满限频。"""
     global _DAILY_LOG_DAY
@@ -110,6 +111,7 @@ async def _idle_ca_refresh(
                 quote,
                 settle=settle,
             )
+            hub.notify_board()
             await asyncio.sleep(gap)
         except TimeoutError:
             continue
@@ -187,7 +189,9 @@ def create_app() -> FastAPI:
             tasks.append(asyncio.create_task(backfill_history(store, hub, stop, direct)))
             tasks.append(asyncio.create_task(supervise(store, hub, stop, token_index, direct)))
         if os.environ.get("WECHAT_FEED_DISABLE_TOKEN") != "1":
-            tasks.append(asyncio.create_task(_idle_ca_refresh(stop, cas, token_index, store)))
+            tasks.append(
+                asyncio.create_task(_idle_ca_refresh(stop, cas, token_index, store, hub))
+            )
         yield
         stop.set()
         for task in tasks:

@@ -132,6 +132,9 @@ class Hub:
     def unsubscribe(self, queue: asyncio.Queue[dict[str, Any]]) -> None:
         self._subscribers.discard(queue)
 
+    def notify_board(self) -> None:
+        self._broadcast({"type": "ca-board"})
+
     def _broadcast(self, event: dict[str, Any]) -> None:
         for queue in list(self._subscribers):
             self._offer(queue, event)

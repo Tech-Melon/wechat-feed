@@ -1498,6 +1498,10 @@ source.onmessage = (event) => {
     scheduleBoard();
     return;
   }
+  if (payload.type === "ca-board") {
+    scheduleBoard();
+    return;
+  }
   if (payload.type === "cleared") {
     state.feeds.all = emptyFeedCache();
     state.feeds.ca = emptyFeedCache();
