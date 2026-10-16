@@ -440,6 +440,12 @@ def _from_gmgn(
     except (TypeError, ValueError):
         supply = 0.0
     market_cap = price * supply if price and supply else 0.0
+    ath_price = _num(price_obj.get("ath"))
+    if not ath_price:
+        ath_price = _num(info.get("ath_price"))
+    ath_mcap = ath_price * supply if ath_price and supply else 0.0
+    if not ath_mcap:
+        ath_mcap = _num(info.get("ath_market_cap") or info.get("history_highest_market_cap"))
     try:
         liquidity = float(info.get("liquidity") or 0)
     except (TypeError, ValueError):
@@ -474,6 +480,7 @@ def _from_gmgn(
         "logo": logo,
         "marketCap": market_cap,
         "marketCapText": format_mcap(market_cap) if market_cap else "—",
+        "athMarketCap": ath_mcap,
         "priceUsd": str(price_obj.get("price") or ""),
         "url": gmgn_token_url(chain or "bsc", address),
         "source": "gmgn",
@@ -501,6 +508,33 @@ def _num(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def ath_from_kline(payload: dict[str, Any] | None, current_mcap: float = 0.0) -> float:
+    if not isinstance(payload, dict):
+        return 0.0
+    raw_data = payload.get("data")
+    data = raw_data if isinstance(raw_data, (dict, list)) else payload
+    rows: list[Any] = []
+    if isinstance(data, dict):
+        raw = data.get("list") or data.get("klines") or data.get("items") or []
+        rows = raw if isinstance(raw, list) else []
+    elif isinstance(data, list):
+        rows = data
+    highs: list[float] = []
+    for row in rows:
+        if isinstance(row, dict):
+            mcap = _num(row.get("market_cap") or row.get("mcp") or row.get("usd_market_cap"))
+            high = _num(row.get("high") or row.get("h") or row.get("max"))
+            highs.append(mcap if mcap > 0 else high)
+        elif isinstance(row, (list, tuple)) and len(row) >= 3:
+            highs.append(_num(row[2]))
+    peak = max(highs) if highs else 0.0
+    if peak <= 0:
+        return 0.0
+    if peak < 1 and current_mcap >= 100:
+        return 0.0
+    return peak
+
+
 def _unix_seconds(value: Any) -> int:
     number = _num(value)
     if number >= 1_000_000_000_000:
@@ -519,6 +553,7 @@ def _from_search(row: dict[str, Any], address: str) -> dict[str, Any]:
     market_cap = _num(
         row.get("market_cap") or row.get("usd_market_cap") or row.get("mcp")
     )
+    ath_mcap = _num(row.get("ath_market_cap") or row.get("history_highest_market_cap"))
     holders = int(_num(row.get("holder_count")))
     created = int(
         _num(row.get("created_at") or row.get("creation_timestamp") or row.get("open_timestamp"))
@@ -545,6 +580,7 @@ def _from_search(row: dict[str, Any], address: str) -> dict[str, Any]:
         "logo": logo,
         "marketCap": market_cap,
         "marketCapText": format_mcap(market_cap) if market_cap else "—",
+        "athMarketCap": ath_mcap,
         "priceUsd": str(row.get("price") or "") if price else "",
         "url": gmgn_token_url(chain or "bsc", address),
         "source": "gmgn-search",
@@ -655,6 +691,7 @@ _GMGN_WEIGHTS = {
     "/v1/token/holders": 5,
     "/v1/token/traders": 5,
     "/v1/market/search": 1,
+    "/v1/market/token_kline": 2,
 }
 _CACHE_TTL = 60.0
 _CACHE_MAX = 2000
@@ -711,6 +748,13 @@ class TokenIndex:
         self._lock = asyncio.Lock()
         self._rate = RateWindow(_plan_weight())
         self._gmgn_cooldown = 0.0
+        self._live = 0
+
+    def idle(self) -> bool:
+        return self._live <= 0 and time.time() >= self._gmgn_cooldown
+
+    def has_key(self) -> bool:
+        return bool(str(self._key_provider() or "").strip())
 
     def _client(self) -> httpx.AsyncClient:
         return http_client()
@@ -732,6 +776,17 @@ class TokenIndex:
     ) -> list[dict[str, Any]]:
         if os.environ.get("WECHAT_FEED_DISABLE_TOKEN") == "1":
             return []
+        self._live += 1
+        try:
+            return await self._resolve_many(cas, on_partial)
+        finally:
+            self._live = max(0, self._live - 1)
+
+    async def _resolve_many(
+        self,
+        cas: list[dict[str, Any]],
+        on_partial: Callable[[list[dict[str, Any]]], None] | None = None,
+    ) -> list[dict[str, Any]]:
         slots: list[dict[str, Any] | None] = [None] * len(cas)
 
         def emit() -> None:
@@ -751,6 +806,22 @@ class TokenIndex:
 
         await asyncio.gather(*[one(index, item) for index, item in enumerate(cas)])
         return [item for item in slots if item is not None]
+
+    async def quote(self, address: str, chain: str = "") -> dict[str, Any] | None:
+        """空闲刷新只用 search（权重 1）。缺 ATH 才补 4h K 线。"""
+        if os.environ.get("WECHAT_FEED_DISABLE_TOKEN") == "1":
+            return None
+        address = str(address or "").strip()
+        if not address:
+            return None
+        coins, _wallets = await self._search_hits(address, chain)
+        if not coins:
+            return None
+        picked = _best_coin(coins) if len(coins) > 1 else coins[0]
+        token = _from_search(picked, address)
+        if token and _num(token.get("athMarketCap")) <= 0:
+            token = await self._fill_ath(token)
+        return token
 
     async def resolve_one(
         self,
@@ -896,6 +967,43 @@ class TokenIndex:
             return None
         return _from_gmgn(info, security if isinstance(security, dict) else None, chain, address)
 
+    async def _fill_ath(self, token: dict[str, Any]) -> dict[str, Any]:
+        if _num(token.get("athMarketCap")) > 0:
+            return token
+        chain = str(token.get("chain") or "")
+        address = str(token.get("address") or "")
+        if not chain or not address or chain == "_":
+            return token
+        created = int(token.get("createdAt") or 0)
+        now = int(time.time())
+        start = created if created > 0 else now - 180 * 86400
+        payload = await self._gmgn_call(
+            "/v1/market/token_kline",
+            {
+                "chain": gmgn_api_chain(chain),
+                "address": address,
+                "resolution": "4h",
+                "from": str(start),
+                "to": str(now),
+            },
+        )
+        peak = ath_from_kline(payload, _num(token.get("marketCap")))
+        if peak <= 0:
+            payload = await self._gmgn_call(
+                "/v1/market/token_kline",
+                {
+                    "chain": gmgn_api_chain(chain),
+                    "address": address,
+                    "resolution": "4h",
+                    "from": str(start * 1000),
+                    "to": str(now * 1000),
+                },
+            )
+            peak = ath_from_kline(payload, _num(token.get("marketCap")))
+        if peak > 0:
+            token["athMarketCap"] = peak
+        return token
+
     async def _dexscreener(self, address: str, hint: str) -> dict[str, Any] | None:
         url = f"https://api.dexscreener.com/latest/dex/tokens/{address}"
         try:
@@ -958,6 +1066,8 @@ class TokenIndex:
             logger.info("GMGN search 命中 {} -> {}", address[:10], chain or "?")
             found = await enrich(chain, _from_search(coin, address))
             if found:
+                if not _num(found.get("athMarketCap")):
+                    found = await self._fill_ath(found)
                 return found
         if wallets:
             card = _from_wallet(address, wallets)
@@ -975,5 +1085,7 @@ class TokenIndex:
             chain = str(dex.get("chain") or "")
             found = await enrich(chain, dex)
             if found:
+                if not _num(found.get("athMarketCap")):
+                    found = await self._fill_ath(found)
                 return found
         return _unresolved(address, hint)

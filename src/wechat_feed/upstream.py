@@ -125,12 +125,16 @@ async def fetch_upstream_groups(upstream_base: str) -> list[dict[str, str]]:
 async def _enrich_card(
     index: TokenIndex,
     hub: Hub,
-    card_id: str,
+    card: dict[str, Any],
     cas: list[dict[str, Any]],
 ) -> None:
+    card_id = str(card.get("id") or "")
+
     def push(tokens: list[dict[str, Any]]) -> None:
-        if tokens:
-            hub.patch(card_id, {"tokenCards": tokens})
+        if not tokens:
+            return
+        remembered = hub.cas.remember(card, tokens) if hub.cas else tokens
+        hub.patch(card_id, {"tokenCards": remembered})
 
     try:
         tokens = await index.resolve_many(cas, on_partial=push)
@@ -157,7 +161,7 @@ def _ingest_card(
         card["conversationName"] = custom_name
     apply_display(card, settings)
     if hub.publish(card) and card.get("cas"):
-        asyncio.create_task(_enrich_card(token_index, hub, str(card["id"]), list(card["cas"])))
+        asyncio.create_task(_enrich_card(token_index, hub, card, list(card["cas"])))
 
 
 def _ingest_raw_message(

@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from wechat_feed.castore import CaStore, format_x, wilson_lower
 from wechat_feed.config import (
     SettingsStore,
     display_group_ids,
@@ -18,6 +19,7 @@ from wechat_feed.tokens import (
     _from_search,
     _search_covers_card,
     allowed_chainicon_url,
+    ath_from_kline,
     candidate_chains,
     chain_from_search,
     extract_cas,
@@ -149,6 +151,18 @@ def test_public_docs_cover_wda_and_unpacked_extension() -> None:
     assert "不在监控群的不入库" in guide
     assert "只过滤显示" in guide
     assert "不带链的 GMGN" in guide
+
+
+def test_ca_board_api(client: TestClient) -> None:
+    listed = client.get("/api/ca-board")
+    assert listed.status_code == 200
+    assert listed.json()["board"] == []
+    assert "tokens" in listed.json()["stats"]
+    missing = client.get("/api/ca-board/user/wxid_nobody")
+    assert missing.status_code == 200
+    assert missing.json()["calls"] == []
+    bad = client.get("/api/ca-board/user/not a user")
+    assert bad.status_code == 400
 
 
 def test_api_defaults_and_two_paths(client: TestClient) -> None:
@@ -318,12 +332,112 @@ def test_candidate_chains_prefers_dex_then_kind() -> None:
             "liquidity": "12343",
             "holder_count": 135,
             "is_honeypot": False,
+            "ath_market_cap": "39329.659",
         },
         evm,
     )
     assert covered["marketCap"] == 27749.795
+    assert covered["athMarketCap"] == 39329.659
     assert _search_covers_card(covered)
     assert not _search_covers_card(_from_search({"chain": "bsc", "symbol": "X"}, evm))
+    assert format_x(5.93) == "5.93x"
+    assert wilson_lower(10, 12) > wilson_lower(1, 1)
+    assert ath_from_kline({"data": {"list": [{"high": 12}, {"h": 20}]}}) == 20
+
+
+def test_ca_store_tracks_first_call_and_board(tmp_path: Path) -> None:
+    store = CaStore(tmp_path / "ca.db")
+    address = "0x" + "ab" * 20
+    first = {
+        "id": "c1",
+        "senderUsername": "wxid_a",
+        "senderName": "大白",
+        "conversationId": "12345678@chatroom",
+        "conversationName": "奶牛群",
+        "createTime": 1_800_000_000,
+    }
+    token = {
+        "address": address,
+        "chain": "bsc",
+        "symbol": "MJ",
+        "marketCap": 1000,
+        "athMarketCap": 1000,
+    }
+    skipped = store.remember(
+        first,
+        [{"address": address, "chain": "bsc", "marketCap": 0, "athMarketCap": 0}],
+    )
+    assert skipped[0].get("foundBy") in (None, "")
+    assert store.board() == []
+    store.remember(
+        first,
+        [{"address": address, "chain": "bsc", "marketCap": 1, "athMarketCap": 50_000}],
+    )
+    assert store.board() == []
+    out = store.remember(first, [token])
+    assert out[0]["foundBy"] == "大白"
+    assert out[0]["foundById"] == "wxid_a"
+    assert out[0]["foundGroup"] == "奶牛群"
+    assert out[0]["isFirstCall"] is True
+    assert out[0]["nowX"] == 1
+    assert out[0]["maxX"] == 1
+    store.remember(
+        {
+            **first,
+            "id": "c2",
+            "senderUsername": "wxid_b",
+            "senderName": "莲花",
+            "createTime": 1_800_000_100,
+        },
+        [{"address": address, "chain": "bsc", "marketCap": 4000, "athMarketCap": 8000}],
+    )
+    again = store.remember(
+        first,
+        [{"address": address, "chain": "bsc", "marketCap": 4000, "athMarketCap": 8000}],
+    )
+    assert again[0]["foundBy"] == "大白"
+    assert again[0]["foundById"] == "wxid_a"
+    assert again[0]["isFirstCall"] is True
+    assert again[0]["maxX"] == 8
+    assert again[0]["nowX"] == 4
+    board = store.board()
+    by_id = {row["userId"]: row for row in board}
+    assert by_id["wxid_a"]["calls"] == 1
+    assert by_id["wxid_b"]["calls"] == 1
+    assert by_id["wxid_a"]["wins"] == 1
+    assert by_id["wxid_b"]["wins"] == 1
+    profile = store.user_profile("wxid_a")
+    assert profile["user"]["calls"] == 1
+    assert profile["calls"][0]["isFirst"] is True
+    assert profile["calls"][0]["win"] is True
+    store._conn.execute(
+        "INSERT INTO ca_tokens(chain, address, first_mcap, ath_mcap, last_mcap, first_at, last_at) "
+        "VALUES ('bsc', '0xdead', 0, 0, 0, 1, 1)"
+    )
+    store._conn.commit()
+    assert store.prune_bad() >= 1
+    store._conn.execute("UPDATE ca_tokens SET refreshed_at = 0")
+    store._conn.commit()
+    stale = store.next_stale(now=1_800_000_200)
+    assert stale is not None
+    store.apply_quote("bsc", address, {"marketCap": 2000, "athMarketCap": 9000}, now=1_800_000_200)
+    decorated = store.decorate_card(
+        {
+            "id": "c2",
+            "tokenCards": [{"address": address, "chain": "bsc"}],
+        }
+    )
+    assert decorated["tokenCards"][0]["isFirstCall"] is False
+    assert decorated["tokenCards"][0]["nowX"] == 2.0
+    first_again = store.decorate_card(
+        {
+            "id": "other",
+            "senderUsername": "wxid_a",
+            "createTime": 1_800_000_000,
+            "tokenCards": [{"address": address, "chain": "bsc"}],
+        }
+    )
+    assert first_again["tokenCards"][0]["isFirstCall"] is True
 
 
 def test_card_store_round_trip(tmp_path: Path) -> None:
@@ -1113,6 +1227,20 @@ def test_package_omits_local_data_and_api_key() -> None:
     app_js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
     assert "await reloadFeeds()" in app_js
     assert "function setListenUsers" in app_js
+    assert "function renderBoard" in app_js
+    assert "function formatFresh" in feed
+    assert "刚刚" in feed
+    assert "分钟前" in feed
+    assert "wf-debut" in feed
+    assert "wf-fresh" in feed
+    assert "isFirstCall" in feed
+    assert "wf-xbar" in feed
+    assert "wf-discover" in feed
+    assert "foundById" in (ROOT / "src" / "wechat_feed" / "castore.py").read_text(encoding="utf-8")
+    assert "next_stale" in (ROOT / "src" / "wechat_feed" / "castore.py").read_text(encoding="utf-8")
+    assert "ca-strip" in (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+    assert "data-open-board" in (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+    assert "ca-page" in (ROOT / "web" / "index.html").read_text(encoding="utf-8")
     css = (ROOT / "web" / "app.css").read_text(encoding="utf-8")
     assert ".member-row[hidden]" in css
     assert 'headers={"Cache-Control": "no-store"}' in (

@@ -6,12 +6,19 @@ import asyncio
 from collections import deque
 from typing import Any
 
+from .castore import CaStore
 from .store import CardStore
 
 
 class Hub:
-    def __init__(self, persist: CardStore | None = None, limit: int = 400) -> None:
+    def __init__(
+        self,
+        persist: CardStore | None = None,
+        cas: CaStore | None = None,
+        limit: int = 400,
+    ) -> None:
         self._persist = persist
+        self.cas = cas
         self._limit = limit
         self._order: deque[str] = deque()
         self._cards: dict[str, dict[str, Any]] = {}

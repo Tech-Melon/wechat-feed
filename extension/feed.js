@@ -360,6 +360,46 @@
     return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${clock}`;
   }
 
+  function formatFresh(seconds, nowSec) {
+    const time = Number(seconds) || 0;
+    if (!time) return "";
+    const now = Number.isFinite(Number(nowSec)) ? Number(nowSec) : Date.now() / 1000;
+    const delta = Math.floor(now - time);
+    if (delta < 60) return "刚刚";
+    if (delta < 10 * 60) return `${Math.floor(delta / 60)}分钟前`;
+    return "";
+  }
+
+  function freshHtml(seconds) {
+    const time = Number(seconds) || 0;
+    const label = formatFresh(time);
+    if (!time) return "";
+    return `<span class="wf-fresh" data-fresh-at="${time}"${label ? "" : " hidden"}>${escapeText(label)}</span>`;
+  }
+
+  function tickFresh(root) {
+    const nodes = [];
+    const scan = (node) => {
+      if (!node) return;
+      if (node.querySelectorAll) nodes.push(...node.querySelectorAll("[data-fresh-at]"));
+      if (node.shadowRoot) scan(node.shadowRoot);
+    };
+    scan(root || document);
+    for (const el of nodes) {
+      const label = formatFresh(Number(el.dataset.freshAt));
+      el.textContent = label;
+      el.hidden = !label;
+    }
+  }
+
+  function startFreshTick(root) {
+    tickFresh(root);
+    const host = root || document;
+    if (host.__wfFreshTimer) return host.__wfFreshTimer;
+    host.__wfFreshTimer = setInterval(() => tickFresh(root), 15000);
+    return host.__wfFreshTimer;
+  }
+
   function initial(name) {
     const text = String(name || "").trim();
     return text ? text.slice(0, 1) : "群";
@@ -462,6 +502,14 @@
   const ICON_X = `<svg class="wf-tag-ico" viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M9.4 6.9 14.7 1h-1.5L8.9 6 5.7 1H1.2l5.6 8.1L1.2 15h1.5L7 9.8 10.4 15h4.5L9.4 6.9zm-1.5 2.2-.4-.6L3.5 2.2h1.8l3.2 4.6.4.6 4.1 5.9h-1.8L7.9 9.1z"/></svg>`;
   const ICON_WEB = `<svg class="wf-tag-ico" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M2.2 8h11.6M8 2.2c1.9 2 2.9 3.8 2.9 5.8S9.9 11.8 8 13.8C6.1 11.8 5.1 10 5.1 8S6.1 4.2 8 2.2z" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>`;
 
+  function formatX(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number) || number <= 0) return "";
+    if (number >= 100) return `${Math.round(number)}x`;
+    if (number >= 10) return `${number.toFixed(1).replace(/\.0$/, "")}x`;
+    return `${Number(number.toFixed(2))}x`;
+  }
+
   function tokenHtml(token) {
     const isWallet = token.kind === "wallet" || token.source === "gmgn-wallet";
     const headLogo = token.logo
@@ -473,6 +521,9 @@
         ? `$${escapeText(token.symbol)}`
         : "未知代币";
     const chain = token.chain ? chainBadge(token.chain) : "";
+    const debut = !isWallet && token.isFirstCall
+      ? `<span class="wf-debut">首发</span>`
+      : "";
     const launch = token.launchpad
       ? `<span class="wf-tag">${escapeText(token.launchpad)}</span>`
       : "";
@@ -501,6 +552,36 @@
     const liq = moneyHtml(token.liquidity, token.liquidityText);
     const holders = token.holders ? escapeText(String(token.holders)) : "";
     const created = formatCreated(token.createdAt);
+    const nowX = formatX(token.nowX);
+    const maxX = formatX(token.maxX);
+    const firstCap = moneyHtml(token.firstMcap, "");
+    const xbar = (nowX || maxX)
+      ? `<div class="wf-xbar">
+           ${nowX ? `<span class="wf-xchip now">当前 <b>${nowX}</b></span>` : ""}
+           ${maxX ? `<span class="wf-xchip max">最高 <b>${maxX}</b></span>` : ""}
+         </div>`
+      : "";
+    const foundName = token.foundBy || token.foundById || "";
+    const foundAv = token.foundById
+      ? `<div class="wf-avatar wf-discover-av" style="background:hsl(${hue(token.foundById)} 62% 46%)">${lazyImg(assetUrl(`/api/avatar?username=${encodeURIComponent(token.foundById)}`), "")}<span>${escapeText(initial(foundName))}</span></div>`
+      : (foundName ? `<div class="wf-avatar wf-discover-av" style="background:hsl(${hue(foundName)} 62% 46%)">${escapeText(initial(foundName))}</div>` : "");
+    const foundWhen = token.foundAt ? escapeText(formatCreated(token.foundAt) || formatTime(token.foundAt)) : "";
+    const foundWho = token.foundById
+      ? `<button type="button" class="wf-discover-name" data-ca-user="${escapeText(token.foundById)}">${escapeText(foundName || "未知")}</button>`
+      : `<strong>${escapeText(foundName || "未知")}</strong>`;
+    const discover = (!isWallet && !token.isFirstCall && (foundName || token.foundGroup))
+      ? `<div class="wf-discover">
+           ${foundAv}
+           <div class="wf-discover-body">
+             <span class="wf-discover-k">首次发现</span>
+             <div class="wf-discover-line">
+               ${foundWho}
+               ${token.foundGroup ? `<span class="wf-discover-g">${escapeText(token.foundGroup)}</span>` : ""}
+             </div>
+             <div class="wf-discover-meta">${firstCap ? `发现市值 ${firstCap}` : ""}${foundWhen ? `${firstCap ? " · " : ""}${foundWhen}` : ""}</div>
+           </div>
+         </div>`
+      : "";
     const note = token.note ? `<div class="wf-wallet-note">${escapeText(token.note)}</div>` : "";
     const tags = `${tax}${flags}${twitter}${website}${telegram}`;
     const fmt = numberFormat === "en" ? "en" : "cn";
@@ -517,6 +598,7 @@
                 </div>
               </div>
               <strong class="wf-mcap-v">${cap || "—"}</strong>
+              ${xbar}
             </div>
             <div class="wf-metrics">${metricTile("池子", liq)}${metricTile("持有", holders)}${metricTile("发现", created ? escapeText(created) : "")}</div>
           </div>`
@@ -532,7 +614,7 @@
         <div class="wf-token-id">
           <div class="wf-token-title">
             <strong>${symbol}</strong>
-            ${isWallet ? `<span class="wf-tag">钱包</span>` : ""}${chain}${launch}
+            ${isWallet ? `<span class="wf-tag">钱包</span>` : ""}${chain}${debut}${launch}
             <a class="wf-token-link" href="${escapeText(token.url || "#")}" target="_blank" rel="noreferrer">${isWallet ? "GMGN 钱包" : "GMGN"}</a>
           </div>
           ${token.name ? `<em>${escapeText(token.name)}</em>` : ""}
@@ -541,6 +623,7 @@
       </div>
       ${note}
       ${metrics}
+      ${discover}
       ${links}
     </div>`;
   }
@@ -748,10 +831,10 @@
       ? ""
       : `<div class="wf-head">
           ${identityHtml(card)}
-          <time>${escapeText(formatTime(card.createTime))}</time>
+          <div class="wf-head-right">${freshHtml(card.createTime)}<time>${escapeText(formatTime(card.createTime))}</time></div>
         </div>`;
     const stackTime = stacked
-      ? `<time class="wf-stack-time">${escapeText(formatTime(card.createTime))}</time>`
+      ? `<div class="wf-stack-time">${freshHtml(card.createTime)}<time>${escapeText(formatTime(card.createTime))}</time></div>`
       : "";
     return `<article class="${cardClass(card)}${stackClass(meta)}" data-id="${escapeText(card.id)}" data-group="${escapeText(card.conversationId || "")}" data-user="${escapeText(card.senderUsername || "")}" style="--wf-hue:${tone}">
       ${avatar}
@@ -807,6 +890,7 @@
           ${card.demo ? `<span class="wf-demo">样例</span>` : ""}
         </div>
         <div class="wf-xside">
+          ${freshHtml(card.createTime)}
           <div class="wf-xactions">
             <button type="button" class="wf-star${card.starred ? " on" : ""}" data-star title="${card.starred ? "取消星标" : "星标此人"}">${card.starred ? "★" : "☆"}</button>
             <button type="button" class="wf-mute" data-mute-user title="屏蔽这个人的发言">不看此人</button>
@@ -837,6 +921,11 @@
       .wf-avatar img { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
       .wf-main { min-width:0; display:block; }
       .wf-head { display:flex; justify-content:space-between; gap:8px; align-items:flex-start; }
+      .wf-head-right, .wf-stack-time { display:flex; align-items:center; gap:8px; color:var(--muted); font-size:12px; white-space:nowrap; }
+      .wf-fresh { color:#e5484d; font-size:11px; font-weight:800; letter-spacing:.02em; white-space:nowrap; }
+      .wf-debut { display:inline-flex; align-items:center; height:18px; padding:0 7px; border-radius:999px; background:#fef3c7; color:#b54708; font-size:11px; font-weight:800; }
+      .wf-discover-name { border:0; padding:0; background:transparent; font:inherit; font-weight:800; cursor:pointer; color:inherit; }
+      .wf-discover-name:hover { color:#175cd3; }
       .wf-who { display:flex; flex-wrap:wrap; gap:6px; align-items:center; min-width:0; }
       .wf-name, .wf-group { border:0; padding:0; background:transparent; font:inherit; cursor:pointer; color:inherit; }
       .wf-name { font-weight:800; font-size:15px; }
@@ -930,6 +1019,27 @@
       .wf-mcap-head { display:flex; justify-content:space-between; align-items:center; gap:8px; }
       .wf-mcap-k { color:#667085; font-size:12px; font-weight:800; letter-spacing:.04em; }
       .wf-mcap-v { display:block; margin-top:4px; color:var(--ink); font-size:26px; font-weight:800; letter-spacing:-.03em; line-height:1.15; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+      .wf-xbar { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin-top:8px; }
+      .wf-xchip { display:inline-flex; align-items:center; gap:4px; height:22px; padding:0 8px; border-radius:999px; font-size:12px; font-weight:700; }
+      .wf-xchip b { font-size:13px; }
+      .wf-xchip.now { background:#ecfdf3; color:#067647; }
+      .wf-xchip.max { background:#fff7ed; color:#c2410c; }
+      .wf-xfound { color:#667085; font-size:12px; }
+      .wf-discover { display:flex; gap:10px; align-items:center; margin-top:8px; padding:8px 10px; border-radius:12px; background:#f8fafc; border:1px solid #e4e7ec; }
+      .wf-discover-av { width:32px; height:32px; font-size:13px; flex:none; }
+      .wf-discover-body { min-width:0; }
+      .wf-discover-k { display:block; color:#667085; font-size:11px; font-weight:800; letter-spacing:.06em; }
+      .wf-discover-line { display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+      .wf-discover-line strong { font-size:14px; }
+      .wf-discover-g { padding:1px 8px; border-radius:999px; background:#e8f1ff; color:#175cd3; font-size:12px; font-weight:700; }
+      .wf-discover-meta { color:#667085; font-size:12px; margin-top:2px; }
+      :host([data-theme="dark"]) .wf-xchip.now { background:rgba(18,183,106,.16); color:#75e0a7; }
+      :host([data-theme="dark"]) .wf-xchip.max { background:rgba(247,144,9,.16); color:#fdb022; }
+      :host([data-theme="dark"]) .wf-xfound { color:#98a2b3; }
+      :host([data-theme="dark"]) .wf-discover { background:rgba(255,255,255,.04); border-color:rgba(255,255,255,.08); }
+      :host([data-theme="dark"]) .wf-discover-g { background:rgba(46,144,250,.22); color:#b2ccff; }
+      :host([data-theme="dark"]) .wf-fresh { color:#fda29b; }
+      :host([data-theme="dark"]) .wf-debut { background:rgba(247,144,9,.22); color:#fdb022; }
       .wf-metric-unit { margin-left:3px; font-size:.62em; font-weight:800; }
       .wf-mcap.is-blue { background:linear-gradient(180deg,#eff6ff,#fff); border-color:#b2ccff; }
       .wf-mcap.is-blue .wf-mcap-v { color:#175cd3; }
@@ -1009,8 +1119,10 @@
       .wf-xcard .wf-group.is-remarked { font-style:normal; background:#e8f1ff; color:#175cd3; box-shadow:inset 0 0 0 1.5px #2e90fa; }
       .wf-xcard .wf-in { color:var(--muted); font-size:11px; }
       .wf-starmark { color:var(--wf-star, #d97706); font-size:12px; line-height:1; }
-      .wf-xside { position:relative; display:flex; align-items:center; justify-content:flex-end; margin-left:4px; flex:none; width:0; min-width:0; min-height:20px; }
+      .wf-xside { position:relative; display:flex; align-items:center; justify-content:flex-end; margin-left:4px; flex:none; min-width:0; min-height:20px; }
+      .wf-xcard .wf-fresh { font-size:11px; }
       .wf-xactions { position:absolute; right:0; top:50%; transform:translateY(-50%); display:flex; flex-wrap:nowrap; gap:4px; padding-left:8px; background:var(--wf-tint); opacity:0; pointer-events:none; transition:opacity .15s; }
+      .wf-xcard:hover .wf-fresh { visibility:hidden; }
       .wf-xcard:hover .wf-xactions { opacity:1; pointer-events:auto; }
       .wf-xcard .wf-mute { opacity:1; }
       .wf-xbody { padding:1px 10px 2px; }
@@ -1118,6 +1230,9 @@
     logoSvg,
     escapeText,
     formatTime,
+    formatFresh,
+    tickFresh,
+    startFreshTick,
     hue,
     feedGroupIds,
     cardInFeed,

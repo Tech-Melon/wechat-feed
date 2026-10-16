@@ -30,6 +30,10 @@ const state = {
     all: emptyFeedCache(),
     ca: emptyFeedCache(),
   },
+  board: [],
+  boardStats: {},
+  userProfile: null,
+  userCalls: [],
 };
 
 function emptyFeedCache() {
@@ -460,6 +464,7 @@ function renderFeed() {
     return;
   }
   feed.innerHTML = cards.map((card, index) => WechatFeed.cardHtml(present(card), WechatFeed.stackMeta(cards, index))).join("");
+  if (window.WechatFeed.tickFresh) window.WechatFeed.tickFresh(feed);
   more.hidden = !state.hasMore;
   more.textContent = state.loadingMore ? "正在加载…" : "加载更早的消息…";
   for (const img of feed.querySelectorAll(".wf-token-logo[src], .wf-token-hero[src]")) {
@@ -549,6 +554,242 @@ function render() {
   renderBlocked();
   renderDirectory();
   renderFeed();
+  renderBoard();
+}
+
+let boardTimer = 0;
+function boardRoute() {
+  const hash = (location.hash || "").replace(/^#/, "");
+  if (hash === "board") return { view: "board" };
+  if (hash.startsWith("board/")) {
+    try {
+      return { view: "user", userId: decodeURIComponent(hash.slice(6)) };
+    } catch (error) {
+      return { view: "board" };
+    }
+  }
+  return { view: "feed" };
+}
+
+function openBoard() {
+  location.hash = "board";
+}
+
+function openBoardUser(userId) {
+  if (!userId) return;
+  location.hash = `board/${encodeURIComponent(userId)}`;
+}
+
+function closeBoard() {
+  location.hash = boardRoute().view === "user" ? "board" : "";
+}
+
+function moneyText(value) {
+  const parts = window.WechatFeed.formatUsd(value, window.WechatFeed.numberFormat());
+  return parts && parts.text ? `${parts.text}${parts.unit || ""}` : "—";
+}
+
+function avatarBlock(userId, name, size) {
+  const hue = window.WechatFeed.hue(userId || name);
+  const px = size || 36;
+  return `<div class="wf-avatar" style="width:${px}px;height:${px}px;background:hsl(${hue} 42% 48%)">
+    <img src="/api/avatar?username=${encodeURIComponent(userId || "")}" alt="" />
+  </div>`;
+}
+
+async function loadBoard() {
+  try {
+    const payload = await readJson(await fetch("/api/ca-board"));
+    state.board = payload.board || [];
+    state.boardStats = payload.stats || {};
+  } catch (error) {
+    state.board = [];
+    state.boardStats = {};
+  }
+  const route = boardRoute();
+  if (route.view === "user" && route.userId) {
+    await loadUserCalls(route.userId);
+  }
+  renderBoard();
+}
+
+async function loadUserCalls(userId) {
+  try {
+    const payload = await readJson(await fetch(`/api/ca-board/user/${encodeURIComponent(userId)}`));
+    state.userProfile = payload.user || null;
+    state.userCalls = payload.calls || [];
+  } catch (error) {
+    state.userProfile = { userId, name: userId };
+    state.userCalls = [];
+  }
+}
+
+function scheduleBoard() {
+  clearTimeout(boardTimer);
+  boardTimer = setTimeout(() => {
+    loadBoard().catch(() => {});
+  }, 800);
+}
+
+function bindBrokenAvatars(root) {
+  if (!root) return;
+  for (const img of root.querySelectorAll("img")) {
+    img.addEventListener("error", () => img.remove());
+  }
+}
+
+function renderStrip() {
+  const count = document.querySelector("#ca-strip-count");
+  const top = document.querySelector("#ca-strip-top");
+  if (!count || !top) return;
+  const rows = state.board || [];
+  const stats = state.boardStats || {};
+  const esc = window.WechatFeed.escapeText;
+  if (!rows.length) {
+    count.textContent = "还没有记录";
+    top.innerHTML = "";
+    return;
+  }
+  count.textContent = stats.users ? `${stats.users} 人 · ${stats.tokens || rows.length} 个 CA` : `${rows.length} 人`;
+  top.innerHTML = rows
+    .slice(0, 3)
+    .map((row) => {
+      const name = esc(row.name || row.userId);
+      return `<button type="button" class="ca-chip" data-rank="${row.rank}" data-ca-user="${esc(row.userId)}">
+        ${avatarBlock(row.userId, row.name, 22)}
+        <b>${row.rank}</b>
+        <span>${name}</span>
+        <em>${esc(row.winRateText)}</em>
+      </button>`;
+    })
+    .join("");
+  bindBrokenAvatars(top);
+}
+
+function personRow(row, starred) {
+  const esc = window.WechatFeed.escapeText;
+  const on = starred.has(row.userId);
+  const name = esc(row.name || row.userId);
+  return `<article class="ca-person" data-rank="${row.rank}" data-ca-user="${esc(row.userId)}">
+    <div class="ca-rank">${row.rank || "—"}</div>
+    ${avatarBlock(row.userId, row.name, 36)}
+    <div class="ca-who">
+      <strong title="${name}">${name}</strong>
+      <span>${row.calls} 次 · 得分 ${esc(row.scoreText || "0")}</span>
+    </div>
+    <div class="ca-pills">
+      <span class="ca-pill win">胜率 ${esc(row.winRateText)}</span>
+      <span class="ca-pill">均 ${esc(row.avgXText || "—")}</span>
+      <span class="ca-pill max">最高 ${esc(row.maxXText || "—")}</span>
+      <span class="ca-pill">${row.wins}/${row.calls} 胜</span>
+    </div>
+    <button type="button" class="ca-star${on ? " on" : ""}" data-board-star="${esc(row.userId)}">${on ? "已星标" : "星标"}</button>
+  </article>`;
+}
+
+function renderUserPage(userId) {
+  const title = document.querySelector("#ca-page-title");
+  const sub = document.querySelector("#ca-page-sub");
+  const box = document.querySelector("#ca-page-body");
+  const esc = window.WechatFeed.escapeText;
+  const user = state.userProfile || { userId, name: userId };
+  const calls = state.userCalls || [];
+  const starred = new Set(state.settings.starred_users || []);
+  const on = starred.has(user.userId);
+  const name = esc(user.name || user.userId);
+  title.textContent = name;
+  sub.textContent = `${user.calls || calls.length} 次喊单 · 胜率 ${user.winRateText || "0%"} · 得分 ${user.scoreText || "0"}`;
+  const head = `<div class="ca-userhead">
+    ${avatarBlock(user.userId, user.name, 48)}
+    <div class="ca-who">
+      <strong>${name}</strong>
+      <span>${user.calls || calls.length} 次 · 均 ${esc(user.avgXText || "—")} · 最高 ${esc(user.maxXText || "—")}</span>
+    </div>
+    <button type="button" class="ca-star${on ? " on" : ""}" data-board-star="${esc(user.userId)}">${on ? "已星标" : "星标"}</button>
+  </div>`;
+  if (!calls.length) {
+    box.innerHTML = `${head}<p class="ca-empty">这个人还没有记入有效 CA。</p>`;
+    bindBrokenAvatars(box);
+    return;
+  }
+  box.innerHTML = head + calls.map((item) => {
+    const symbol = item.symbol ? `$${esc(item.symbol)}` : esc(item.address.slice(0, 8));
+    const win = item.win ? `<span class="ca-pill win">胜</span>` : `<span class="ca-pill">未到 2x</span>`;
+    const first = item.isFirst ? `<span class="wf-debut">首发</span>` : "";
+    const when = window.WechatFeed.formatTime(item.calledAt);
+    return `<article class="ca-call">
+      <div class="ca-call-top">
+        <strong>${symbol}</strong>
+        ${first}
+        ${win}
+        <span class="ca-pill">${esc(item.chain || "")}</span>
+      </div>
+      <div class="ca-call-x">
+        <span class="ca-pill">喊单 ${esc(moneyText(item.callMcap))}</span>
+        <span class="ca-pill">当前 ${esc(item.nowXText || "—")}</span>
+        <span class="ca-pill max">最高 ${esc(item.maxXText || "—")}</span>
+      </div>
+      <div class="ca-call-meta">${esc(item.groupName || "")}${when ? ` · ${esc(when)}` : ""} · ${esc(item.address)}</div>
+    </article>`;
+  }).join("");
+  bindBrokenAvatars(box);
+}
+
+function renderBoardPage() {
+  const title = document.querySelector("#ca-page-title");
+  const sub = document.querySelector("#ca-page-sub");
+  const box = document.querySelector("#ca-page-body");
+  const rows = state.board || [];
+  const stats = state.boardStats || {};
+  const starred = new Set(state.settings.starred_users || []);
+  title.textContent = "CA 发现榜";
+  sub.textContent = stats.tokens
+    ? `${stats.users || rows.length} 人 · ${stats.tokens} 个 CA。胜率按 ATH ≥ 2 倍该用户首次喊单市值。空闲时自动刷新。`
+    : "按喊单次数、胜率（ATH ≥ 2 倍该用户首次喊单市值）和平均倍数综合打分。";
+  if (!rows.length) {
+    box.innerHTML = `<p class="ca-empty">还没有 CA 发现记录。群里出现合约并查出市值后会记在这里。</p>`;
+    return;
+  }
+  box.innerHTML = rows.map((row) => personRow(row, starred)).join("");
+  bindBrokenAvatars(box);
+}
+
+function renderBoard() {
+  const page = document.querySelector("#ca-page");
+  const route = boardRoute();
+  document.body.classList.toggle("is-board", route.view !== "feed");
+  renderStrip();
+  if (!page) return;
+  if (route.view === "feed") {
+    page.hidden = true;
+    return;
+  }
+  page.hidden = false;
+  if (route.view === "user") renderUserPage(route.userId);
+  else renderBoardPage();
+}
+
+async function starFromBoard(userId) {
+  if (!userId) return;
+  const current = new Set(state.settings.starred_users || []);
+  const colors = { ...(state.settings.star_colors || {}) };
+  if (current.has(userId)) {
+    current.delete(userId);
+    delete colors[userId];
+  } else {
+    current.add(userId);
+    colors[userId] = colors[userId] || "amber";
+  }
+  await saveSettings({ starred_users: Array.from(current), star_colors: colors });
+  renderBoard();
+}
+
+async function onBoardHash() {
+  const route = boardRoute();
+  if (route.view === "user" && route.userId) {
+    await loadUserCalls(route.userId);
+  }
+  renderBoard();
 }
 
 async function readJson(response) {
@@ -836,6 +1077,8 @@ async function load() {
   render();
   await loadFeed({ reset: true, caOnly: Boolean(state.settings.ca_only) });
   loadFeed({ reset: true, caOnly: !state.settings.ca_only }).catch(() => {});
+  loadBoard().catch(() => {});
+  if (window.WechatFeed.startFreshTick) window.WechatFeed.startFreshTick(document);
 }
 
 query.addEventListener("input", () => {
@@ -1056,6 +1299,11 @@ feed.addEventListener("click", (event) => {
     setNotice("已复制合约");
     return;
   }
+  const caUser = event.target.closest("[data-ca-user]");
+  if (caUser) {
+    openBoardUser(caUser.dataset.caUser);
+    return;
+  }
   const star = event.target.closest("[data-star]");
   if (star) {
     const card = star.closest(".wf-card");
@@ -1120,6 +1368,7 @@ source.onmessage = (event) => {
     state.feeds.ca.messages = apply(state.feeds.ca.messages);
     syncViewFromCache();
     renderFeed();
+    if ((payload.card.tokenCards || []).length) scheduleBoard();
     return;
   }
   if (payload.type === "message" && payload.card) {
@@ -1132,6 +1381,7 @@ source.onmessage = (event) => {
     if ((payload.card.addresses || []).length) remember(state.feeds.ca, payload.card);
     syncViewFromCache();
     renderFeed();
+    if ((payload.card.cas || payload.card.tokenCards || []).length) scheduleBoard();
   }
 };
 
@@ -1141,5 +1391,31 @@ const sentinel = new IntersectionObserver((entries) => {
   }
 });
 sentinel.observe(more);
+
+document.addEventListener("click", (event) => {
+  const star = event.target.closest("[data-board-star]");
+  if (star) {
+    event.preventDefault();
+    event.stopPropagation();
+    starFromBoard(star.dataset.boardStar).catch((error) => setNotice(error.message));
+    return;
+  }
+  if (event.target.closest("[data-open-board]")) {
+    openBoard();
+    return;
+  }
+  if (event.target.closest("[data-board-back]")) {
+    closeBoard();
+    return;
+  }
+  const user = event.target.closest("[data-ca-user]");
+  if (user && !event.target.closest("#feed")) {
+    openBoardUser(user.dataset.caUser);
+  }
+});
+
+window.addEventListener("hashchange", () => {
+  onBoardHash().catch((error) => setNotice(error.message));
+});
 
 load().catch((error) => setNotice(error.message));

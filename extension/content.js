@@ -478,6 +478,12 @@
         send("muteGroup", { groupId });
         return;
       }
+      const caUser = event.target.closest("[data-ca-user]");
+      if (caUser) {
+        const userId = caUser.dataset.caUser;
+        if (userId) window.open(`${API}/#board/${encodeURIComponent(userId)}`, "_blank", "noreferrer");
+        return;
+      }
       const user = event.target.closest("[data-remark-user]");
       if (user) {
         const card = user.closest("[data-user]");
@@ -533,7 +539,7 @@
     return (card.tokenCards || [])
       .map(
         (token) =>
-          `${token.source || ""}:${token.marketCap || 0}:${token.liquidity || 0}:${token.holders || 0}`
+          `${token.source || ""}:${token.marketCap || 0}:${token.liquidity || 0}:${token.holders || 0}:${token.nowX || 0}:${token.maxX || 0}:${token.foundById || ""}:${token.isFirstCall ? 1 : 0}`
       )
       .join(",");
   }
@@ -560,6 +566,7 @@
     }
     list.innerHTML = shown.map((card, index) => WechatFeed.gmgnCardHtml(present(card), WechatFeed.stackMeta(shown, index))).join("");
     hydrate(list);
+    if (WechatFeed.startFreshTick) WechatFeed.startFreshTick(list);
   }
 
   function paintAll() {
@@ -1016,6 +1023,7 @@
     host._stamp = stamp;
     host._list.innerHTML = rows.map((card, index) => WechatFeed.gmgnCardHtml(present(card), WechatFeed.stackMeta(rows, index))).join("");
     hydrate(host._list);
+    if (WechatFeed.startFreshTick) WechatFeed.startFreshTick(host._list);
   }
 
   function loadOlderForTweets(itemList) {

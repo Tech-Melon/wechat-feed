@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
 from . import http as feed_http
+from .castore import CaStore
 from .config import (
     SettingsStore,
     data_dir,
@@ -53,6 +54,39 @@ _AVATAR_CACHE = "private, max-age=86400"
 _LISTEN_HOST = "127.0.0.1"
 _LISTEN_PORT = 8765
 _PAGE_SIZE = 30
+_IDLE_GAP = 4.0
+_USER_ID = re.compile(r"^[A-Za-z0-9_@.\-]{1,80}$")
+
+
+async def _idle_ca_refresh(stop: asyncio.Event, cas: CaStore, tokens: TokenIndex) -> None:
+    """实时补全空闲时，用 search 刷新榜上的市值/ATH。CA 多时按热度分层，不跟实时抢配额。"""
+    try:
+        await asyncio.wait_for(stop.wait(), timeout=15)
+        return
+    except TimeoutError:
+        pass
+    while not stop.is_set():
+        try:
+            if not tokens.has_key() or not tokens.idle():
+                await asyncio.wait_for(stop.wait(), timeout=8)
+                continue
+            row = cas.next_stale()
+            if row is None:
+                await asyncio.wait_for(stop.wait(), timeout=20)
+                continue
+            quote = await tokens.quote(str(row.get("address") or ""), str(row.get("chain") or ""))
+            cas.apply_quote(str(row.get("chain") or ""), str(row.get("address") or ""), quote)
+            await asyncio.sleep(_IDLE_GAP)
+        except TimeoutError:
+            continue
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.info("空闲刷新 CA 失败: {}", type(exc).__name__)
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=8)
+            except TimeoutError:
+                continue
 
 
 def public_settings(settings: dict[str, Any]) -> dict[str, Any]:
@@ -93,7 +127,8 @@ def _sse(payload: dict[str, Any]) -> str:
 def create_app() -> FastAPI:
     store = SettingsStore(data_dir() / "settings.json")
     persist = CardStore(data_dir() / "feed.db")
-    hub = Hub(persist=persist)
+    cas = CaStore(data_dir() / "ca.db")
+    hub = Hub(persist=persist, cas=cas)
     token_index = TokenIndex(lambda: str(store.get().get("gmgn_api_key") or ""))
     direct = DirectSource(data_dir() / "direct.json")
     root = project_root()
@@ -103,13 +138,22 @@ def create_app() -> FastAPI:
         app.state.store = store
         app.state.hub = hub
         app.state.persist = persist
+        app.state.cas = cas
         app.state.tokens = token_index
         persist.prune()
+        cas.prune()
+        for card in persist.token_cards():
+            cas.remember(card, list(card.get("tokenCards") or []))
+        dropped = cas.prune_bad()
+        if dropped:
+            logger.info("已丢弃异常历史 CA {} 条", dropped)
         stop = asyncio.Event()
         tasks: list[asyncio.Task[None]] = []
         if os.environ.get("WECHAT_FEED_DISABLE_UPSTREAM") != "1":
             tasks.append(asyncio.create_task(backfill_history(store, hub, stop, direct)))
             tasks.append(asyncio.create_task(supervise(store, hub, stop, token_index, direct)))
+        if os.environ.get("WECHAT_FEED_DISABLE_TOKEN") != "1":
+            tasks.append(asyncio.create_task(_idle_ca_refresh(stop, cas, token_index)))
         yield
         stop.set()
         for task in tasks:
@@ -145,7 +189,8 @@ def create_app() -> FastAPI:
 
         def push(tokens: list[dict[str, Any]]) -> None:
             if tokens:
-                hub.patch(card_id, {"tokenCards": tokens})
+                remembered = cas.remember(card, tokens)
+                hub.patch(card_id, {"tokenCards": remembered})
 
         try:
             tokens = await token_index.resolve_many(list(card["cas"]), on_partial=push)
@@ -216,6 +261,7 @@ def create_app() -> FastAPI:
         shown = [apply_display(dict(card), settings) for card in cards]
         for card in shown:
             persist.fill_context(card)
+            cas.decorate_card(card)
         pending = 0
         for card in shown:
             if pending >= 12:
@@ -536,9 +582,22 @@ def create_app() -> FastAPI:
         if card.get("cas"):
             tokens = await token_index.resolve_many(list(card["cas"]))
             if tokens:
+                tokens = cas.remember(card, tokens)
                 hub.patch(str(card["id"]), {"tokenCards": tokens})
                 card["tokenCards"] = tokens
         return {"ok": True, "card": card}
+
+    @app.get("/api/ca-board")
+    def ca_board() -> dict[str, Any]:
+        return {"ok": True, "board": cas.board(), "stats": cas.stats()}
+
+    @app.get("/api/ca-board/user/{user_id}")
+    def ca_board_user(user_id: str) -> dict[str, Any]:
+        ident = str(user_id or "").strip()
+        if not _USER_ID.match(ident):
+            raise HTTPException(status_code=400, detail="用户名不合法")
+        payload = cas.user_profile(ident)
+        return {"ok": True, **payload}
 
     @app.get("/api/events")
     async def events() -> StreamingResponse:

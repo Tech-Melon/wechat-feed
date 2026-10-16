@@ -40,6 +40,20 @@ class CardStore:
     def cutoff(self) -> int:
         return int(time.time()) - KEEP_SECONDS
 
+    def token_cards(self) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            "SELECT payload FROM cards ORDER BY create_time ASC, received_at ASC, id ASC"
+        ).fetchall()
+        out: list[dict[str, Any]] = []
+        for (raw,) in rows:
+            try:
+                card = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(card, dict) and card.get("tokenCards"):
+                out.append(card)
+        return out
+
     def save(self, card: dict[str, Any], *, replace: bool = True) -> None:
         card_id = str(card.get("id") or "")
         if not card_id:
