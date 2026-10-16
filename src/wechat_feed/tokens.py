@@ -508,21 +508,20 @@ def _num(value: Any, default: float = 0.0) -> float:
         return default
 
 
-_KLINE_FALLBACK = {"1m": "5m", "5m": "1h", "1h": "4h", "4h": "1d"}
 _KLINE_SPAN = {"1m": 60, "5m": 300, "1h": 3600, "4h": 14400, "1d": 86400}
 
 
 def kline_resolution(created_at: int, now: int | None = None) -> str:
-    """按首次发现到现在的时长选周期。3 天内用 4h，避免日线开盘早于喊单被整根丢掉。"""
+    """Ave：<10m 用 1m，否则 5m/1h/4h/1d。粗柱会把喊单前的高点算进当根，近处必须细。"""
     stamp = int(now or time.time())
     age = max(0, stamp - int(created_at or 0)) if created_at else 7 * 86400
-    if age < 600:
+    if age < 1800:
         return "1m"
     if age < 3600:
         return "5m"
     if age < 43200:
         return "1h"
-    if age < 3 * 86400:
+    if age < 86400:
         return "4h"
     return "1d"
 
@@ -575,6 +574,36 @@ def kline_bars(
         out.append((bar_time, value))
     out.sort(key=lambda item: item[0])
     return out
+
+
+def kline_last_close(payload: dict[str, Any] | None) -> float:
+    if not isinstance(payload, dict):
+        return 0.0
+    raw_data = payload.get("data")
+    data = raw_data if isinstance(raw_data, (dict, list)) else payload
+    rows: list[Any] = []
+    if isinstance(data, dict):
+        raw = (
+            data.get("list")
+            or data.get("klines")
+            or data.get("items")
+            or data.get("points")
+            or []
+        )
+        rows = raw if isinstance(raw, list) else []
+    elif isinstance(data, list):
+        rows = data
+    close = 0.0
+    for row in rows:
+        if isinstance(row, dict):
+            value = _num(row.get("close") or row.get("c"))
+            if value > 0:
+                close = value
+        elif isinstance(row, (list, tuple)) and len(row) >= 5:
+            value = _num(row[4])
+            if value > 0:
+                close = value
+    return close
 
 
 def peak_since(
@@ -878,21 +907,41 @@ class TokenIndex:
         await asyncio.gather(*[one(index, item) for index, item in enumerate(cas)])
         return [item for item in slots if item is not None]
 
-    async def quote(self, address: str, chain: str = "", since: int = 0) -> dict[str, Any] | None:
-        """空闲刷新：search 拿现价，再按全局首发时间拉一次 K 线，各群共用。"""
+    async def quote(
+        self,
+        address: str,
+        chain: str = "",
+        since: int = 0,
+        last_mcap: float = 0.0,
+        last_price: float = 0.0,
+    ) -> dict[str, Any] | None:
+        """空闲刷新。已定链且有价格锚点时只打 K 线；否则 search 一次把价格写下。"""
         if os.environ.get("WECHAT_FEED_DISABLE_TOKEN") == "1":
             return None
         address = str(address or "").strip()
         if not address:
             return None
-        coins, _wallets = await self._search_hits(address, chain)
-        if not coins:
-            return None
-        picked = _best_coin(coins) if len(coins) > 1 else coins[0]
-        token = _from_search(picked, address)
-        if token:
-            token = await self._fill_ath(token, force=True, since=since)
-        return token
+        self._live += 1
+        try:
+            chain_norm = _norm_chain(chain)
+            if chain_norm and last_price > 0 and last_mcap > 0:
+                token: dict[str, Any] = {
+                    "address": address,
+                    "chain": gmgn_api_chain(chain_norm),
+                    "marketCap": last_mcap,
+                    "priceUsd": last_price,
+                }
+                return await self._fill_ath(token, force=True, since=since)
+            coins, _wallets = await self._search_hits(address, chain_norm)
+            if not coins:
+                return None
+            picked = _best_coin(coins) if len(coins) > 1 else coins[0]
+            token = _from_search(picked, address)
+            if token:
+                token = await self._fill_ath(token, force=True, since=since)
+            return token
+        finally:
+            self._live = max(0, self._live - 1)
 
     async def resolve_one(
         self,
@@ -1059,19 +1108,7 @@ class TokenIndex:
             },
         )
         bars = kline_bars(payload, current_mcap, current_price)
-        if bars:
-            return bars
-        payload = await self._gmgn_call(
-            "/v1/market/token_kline",
-            {
-                "chain": gmgn_api_chain(chain),
-                "address": address,
-                "resolution": resolution,
-                "from": str(start),
-                "to": str(now),
-            },
-        )
-        return kline_bars(payload, current_mcap, current_price)
+        return bars, kline_last_close(payload), payload
 
     async def _fill_ath(
         self,
@@ -1095,23 +1132,19 @@ class TokenIndex:
         fetch_from = max(0, start - span)
         current_mcap = _num(token.get("marketCap"))
         current_price = _num(token.get("priceUsd") or token.get("price"))
-        bars = await self._kline_fetch(
+        bars, last_close, _payload = await self._kline_fetch(
             chain, address, resolution, fetch_from, now, current_mcap, current_price
         )
-        fallback = _KLINE_FALLBACK.get(resolution)
-        if not bars and fallback:
-            span = _KLINE_SPAN.get(fallback, span)
-            fetch_from = max(0, start - span)
-            bars = await self._kline_fetch(
-                chain, address, fallback, fetch_from, now, current_mcap, current_price
-            )
         token["klineBars"] = bars
         token["klineInterval"] = span
         peak = peak_since(bars, start, span)
+        if last_close > 0 and current_price > 0 and current_mcap > 0:
+            token["marketCap"] = current_mcap * (last_close / current_price)
+            token["priceUsd"] = last_close
         if force:
-            chosen = max(peak, current_mcap)
+            chosen = max(peak, _num(token.get("marketCap")), current_mcap)
         else:
-            chosen = max(existing, peak, current_mcap)
+            chosen = max(existing, peak, _num(token.get("marketCap")), current_mcap)
         if chosen > 0:
             token["athMarketCap"] = chosen
         return token

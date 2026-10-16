@@ -54,8 +54,8 @@ _AVATAR_CACHE = "private, max-age=86400"
 _LISTEN_HOST = "127.0.0.1"
 _LISTEN_PORT = 8765
 _PAGE_SIZE = 30
-_IDLE_GAP = 6.0
-_DAILY_GAP = 8.0
+_IDLE_GAP = 2.0
+_DAILY_GAP = 2.5
 _USER_ID = re.compile(r"^[A-Za-z0-9_@.\-]{1,80}$")
 _DAILY_LOG_DAY = 0
 
@@ -104,6 +104,8 @@ async def _idle_ca_refresh(
                 str(row.get("address") or ""),
                 str(row.get("chain") or ""),
                 since=int(row.get("first_at") or 0),
+                last_mcap=float(row.get("last_mcap") or 0),
+                last_price=float(row.get("last_price") or 0),
             )
             cas.apply_quote(
                 str(row.get("chain") or ""),

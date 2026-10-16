@@ -188,6 +188,10 @@ class CaStore:
             self._conn.execute(
                 "ALTER TABLE ca_calls ADD COLUMN ath_mcap REAL NOT NULL DEFAULT 0"
             )
+        if "call_price" not in call_cols:
+            self._conn.execute(
+                "ALTER TABLE ca_calls ADD COLUMN call_price REAL NOT NULL DEFAULT 0"
+            )
         group_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(ca_group_firsts)")}
         if "ath_mcap" not in group_cols:
             self._conn.execute(
@@ -196,6 +200,10 @@ class CaStore:
         if "settled_day" not in cols:
             self._conn.execute(
                 "ALTER TABLE ca_tokens ADD COLUMN settled_day INTEGER NOT NULL DEFAULT 0"
+            )
+        if "last_price" not in cols:
+            self._conn.execute(
+                "ALTER TABLE ca_tokens ADD COLUMN last_price REAL NOT NULL DEFAULT 0"
             )
 
     def _backfill_group_firsts(self) -> None:
@@ -343,6 +351,7 @@ class CaStore:
                         card_id,
                         mcap,
                         now,
+                        _num(token.get("priceUsd")),
                     )
                 if group_id and mcap > 0:
                     self._upsert_group_first(
@@ -419,6 +428,12 @@ class CaStore:
                     now,
                 ),
             )
+            price = _num(token.get("priceUsd"))
+            if price > 0:
+                self._conn.execute(
+                    "UPDATE ca_tokens SET last_price = ? WHERE chain = ? AND address = ?",
+                    (price, chain, address),
+                )
             return
         first_mcap = _num(row["first_mcap"])
         if first_mcap <= 0 and mcap > 0 and is_sane(mcap, mcap, mcap):
@@ -429,6 +444,7 @@ class CaStore:
         last_mcap = _num(row["last_mcap"])
         if mcap > 0 and (first_mcap <= 0 or mcap / first_mcap <= MAX_X):
             last_mcap = mcap
+        price = _num(token.get("priceUsd"))
         self._conn.execute(
             """
             UPDATE ca_tokens SET
@@ -437,10 +453,22 @@ class CaStore:
                 first_mcap = ?,
                 ath_mcap = ?,
                 last_mcap = ?,
-                last_at = ?
+                last_at = ?,
+                last_price = CASE WHEN ? > 0 THEN ? ELSE last_price END
             WHERE chain = ? AND address = ?
             """,
-            (symbol, name, first_mcap, ath_mcap, last_mcap, now, chain, address),
+            (
+                symbol,
+                name,
+                first_mcap,
+                ath_mcap,
+                last_mcap,
+                now,
+                price,
+                price,
+                chain,
+                address,
+            ),
         )
 
     def _upsert_call(
@@ -454,6 +482,7 @@ class CaStore:
         card_id: str,
         mcap: float,
         now: int,
+        price: float = 0.0,
     ) -> None:
         row = self._conn.execute(
             "SELECT mcap FROM ca_calls WHERE chain = ? AND address = ? AND caller_id = ?",
@@ -464,8 +493,8 @@ class CaStore:
                 """
                 INSERT INTO ca_calls (
                     chain, address, caller_id, caller_name,
-                    group_id, group_name, card_id, mcap, called_at, ath_mcap
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    group_id, group_name, card_id, mcap, called_at, ath_mcap, call_price
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     chain,
@@ -478,6 +507,7 @@ class CaStore:
                     mcap,
                     now,
                     mcap,
+                    price,
                 ),
             )
             return
@@ -863,7 +893,8 @@ class CaStore:
             for min_last, max_last, max_refreshed in bands:
                 row = self._conn.execute(
                     """
-                    SELECT chain, address, last_at, refreshed_at, ath_mcap, first_mcap, first_at
+                    SELECT chain, address, last_at, refreshed_at, ath_mcap, first_mcap,
+                           first_at, last_mcap, last_price
                     FROM ca_tokens
                     WHERE first_mcap > 0
                       AND IFNULL(address, '') != ''
@@ -887,7 +918,7 @@ class CaStore:
             row = self._conn.execute(
                 """
                 SELECT t.chain, t.address, t.last_at, t.refreshed_at,
-                       t.ath_mcap, t.first_mcap, t.first_at
+                       t.ath_mcap, t.first_mcap, t.first_at, t.last_mcap, t.last_price
                 FROM ca_tokens t
                 WHERE t.first_mcap > 0
                   AND IFNULL(t.address, '') != ''
@@ -935,8 +966,10 @@ class CaStore:
             symbol = ""
             name = ""
             bars = _quote_bars(quote)
+            price = 0.0
             if quote:
                 mcap = _num(quote.get("marketCap"))
+                price = _num(quote.get("priceUsd"))
                 symbol = _text(quote.get("symbol"))
                 name = _text(quote.get("name"))
                 if mcap > 0 and (first <= 0 or mcap / first <= MAX_X):
@@ -961,10 +994,11 @@ class CaStore:
                     ath_mcap = ?,
                     last_mcap = ?,
                     refreshed_at = ?,
-                    settled_day = COALESCE(?, settled_day)
+                    settled_day = COALESCE(?, settled_day),
+                    last_price = CASE WHEN ? > 0 THEN ? ELSE last_price END
                 WHERE chain = ? AND address = ?
                 """,
-                (symbol, name, first, ath, last, stamp, settled, chain, address),
+                (symbol, name, first, ath, last, stamp, settled, price, price, chain, address),
             )
             self._conn.commit()
 

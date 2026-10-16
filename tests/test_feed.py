@@ -364,6 +364,7 @@ def test_candidate_chains_prefers_dex_then_kind() -> None:
     assert wilson_lower(10, 12) > wilson_lower(1, 1)
     assert ath_from_kline({"data": {"list": [{"high": 12}, {"h": 20}]}}) == 20
     assert kline_resolution(int(__import__("time").time()) - 120) == "1m"
+    assert kline_resolution(int(__import__("time").time()) - 2400) == "5m"
     assert kline_resolution(int(__import__("time").time()) - 80000) == "4h"
     assert ath_from_kline(
         {"data": {"list": [{"high": 0.002}, {"high": 0.005}]}},
@@ -1373,6 +1374,9 @@ def test_package_omits_local_data_and_api_key() -> None:
     assert "notify_board" in (ROOT / "src" / "wechat_feed" / "hub.py").read_text(
         encoding="utf-8"
     )
+    assert "from\": str(start * 1000)" in (
+        ROOT / "src" / "wechat_feed" / "tokens.py"
+    ).read_text(encoding="utf-8")
     assert "WechatFeed.chainBadge" in app_js
     assert "function medalSvg" in app_js
     assert "function filterUserCalls" in app_js
@@ -1395,7 +1399,7 @@ def test_package_omits_local_data_and_api_key() -> None:
     assert "since=since" in (ROOT / "src" / "wechat_feed" / "tokens.py").read_text(
         encoding="utf-8"
     )
-    assert "_KLINE_FALLBACK" in (ROOT / "src" / "wechat_feed" / "tokens.py").read_text(
+    assert "_KLINE_SPAN" in (ROOT / "src" / "wechat_feed" / "tokens.py").read_text(
         encoding="utf-8"
     )
     castore_py = (ROOT / "src" / "wechat_feed" / "castore.py").read_text(encoding="utf-8")
