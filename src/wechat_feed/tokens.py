@@ -793,7 +793,7 @@ _GMGN_WEIGHTS = {
     "/v1/market/search": 1,
     "/v1/market/token_kline": 2,
 }
-_CACHE_TTL = 60.0
+_CACHE_TTL = 2.0
 _CACHE_MAX = 2000
 
 

@@ -1380,6 +1380,9 @@ def test_package_omits_local_data_and_api_key() -> None:
     assert "from\": str(start * 1000)" in (
         ROOT / "src" / "wechat_feed" / "tokens.py"
     ).read_text(encoding="utf-8")
+    assert "_CACHE_TTL = 2.0" in (ROOT / "src" / "wechat_feed" / "tokens.py").read_text(
+        encoding="utf-8"
+    )
     assert "WechatFeed.chainBadge" in app_js
     assert "function medalSvg" in app_js
     assert "function filterUserCalls" in app_js
