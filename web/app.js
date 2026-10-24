@@ -39,6 +39,7 @@ const state = {
   userRange: "all",
   userWin: "all",
   boardRange: "all",
+  boardLimit: 100,
   userRefresh: null,
 };
 
@@ -1092,8 +1093,11 @@ function renderBoardPage() {
   const dormant = stats.dormant
     ? ` · <span title="超过 24 小时没人再喊、现市值不到 ${esc(moneyText(stats.dormantMcap || 15000))} 的暂停刷新，再被喊到自动恢复">${stats.dormant} 个休眠</span>`
     : "";
+  const final = stats.final
+    ? ` · <span title="最后一次被喊超过 ${stats.finalDays || 7} 天，倍数已定格，不再自动刷新；再被喊到自动恢复，也可在详情页手动刷新">${stats.final} 个已定格</span>`
+    : "";
   sub.innerHTML = stats.tokens
-    ? `${stats.users || rows.length} 人 · ${stats.tokens} 个 CA · ${rule}${dormant}`
+    ? `${stats.users || rows.length} 人 · ${stats.tokens} 个 CA · ${rule}${dormant}${final}`
     : `按喊单次数、胜率和平均倍数综合打分 · ${rule}`;
   const rangeOn = (key) => ((state.boardRange || "all") === key ? " on" : "");
   const toolbar = `<div class="ca-toolbar">
@@ -1111,7 +1115,12 @@ function renderBoardPage() {
     }</p>`;
     return;
   }
-  box.innerHTML = toolbar + rows.map((row) => personRow(row, starred)).join("");
+  // 人多时先渲染前 boardLimit 个，往下点「显示更多」再加。
+  const shown = rows.slice(0, state.boardLimit || 100);
+  const more = rows.length > shown.length
+    ? `<button type="button" class="ca-more" data-board-more>显示更多（还有 ${rows.length - shown.length} 人）</button>`
+    : "";
+  box.innerHTML = toolbar + shown.map((row) => personRow(row, starred)).join("") + more;
   bindBrokenAvatars(box);
 }
 
@@ -1829,11 +1838,18 @@ document.addEventListener("click", (event) => {
     }
     return;
   }
+  if (event.target.closest("[data-board-more]")) {
+    event.preventDefault();
+    state.boardLimit = (state.boardLimit || 100) + 100;
+    renderBoard();
+    return;
+  }
   const boardRangeBtn = event.target.closest("[data-board-range]");
   if (boardRangeBtn) {
     event.preventDefault();
     event.stopPropagation();
     state.boardRange = boardRangeBtn.dataset.boardRange || "all";
+    state.boardLimit = 100;
     loadBoard().catch((error) => setNotice(error.message));
     return;
   }

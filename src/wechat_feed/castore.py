@@ -29,6 +29,12 @@ REFRESH_COLD = 6 * 3600
 SETTLE_DELAY = 60
 SETTLE_RETRY = 60
 SETTLE_WINDOW = 6 * 3600
+# 最后一次被喊超过 7 天的币「定格」：不再自动刷新，倍数停在最后一次刷新的值。
+# meme 的喊单后高点绝大多数在前 1~3 天，7 天后基本不变；再被喊到自动恢复，也可手动刷新。
+# 这样后台要刷的币只取决于最近 7 天的喊单量，和库里总共多少币无关。
+FINAL_AGE = 7 * 86400
+# 榜单与统计的内存缓存：数据没变且不超过这么久就直接复用（待定状态随时间变化，所以要有上限）。
+BOARD_CACHE_TTL = 30
 # 超过 24 小时没人再喊、且现市值低于 1.5 万的币暂停拉 K 线，下次被喊到再恢复。
 DORMANT_AGE = 24 * 3600
 DORMANT_MCAP = 15_000.0
@@ -120,6 +126,9 @@ class CaStore:
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._path = path
+        # 每次写库加一，榜单/统计缓存据此判断是否失效。
+        self._version = 0
+        self._cache: dict[str, tuple[int, float, Any]] = {}
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(str(path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
@@ -180,6 +189,11 @@ class CaStore:
         )
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_ca_calls_time ON ca_calls(called_at)")
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_ca_tokens_time ON ca_tokens(first_at)")
+        # 后台选币按最后被喊时间分层；详情页、手动刷新按喊单人查。
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_ca_tokens_last ON ca_tokens(last_at)")
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ca_calls_caller ON ca_calls(caller_id, called_at)"
+        )
         # 手动删除过的时间段：启动时从 feed.db 回灌卡片，落在这些段里的不再写回榜单。
         self._conn.execute(
             """
@@ -195,6 +209,14 @@ class CaStore:
             "CREATE INDEX IF NOT EXISTS idx_ca_group_firsts_time ON ca_group_firsts(first_at)"
         )
         self._ensure_columns()
+        # 首结算队列从喊单表反查（只看未结算的），不再逐个代币做 EXISTS。
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ca_calls_unsettled ON ca_calls(settled, called_at)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ca_group_firsts_unsettled "
+            "ON ca_group_firsts(settled, first_at)"
+        )
         self._backfill_group_firsts()
         self._conn.commit()
 
@@ -287,7 +309,7 @@ class CaStore:
                 "DELETE FROM ca_group_firsts WHERE first_at > 0 AND first_at < ?", (cut,)
             )
             self._conn.execute("DELETE FROM ca_tokens WHERE first_at > 0 AND first_at < ?", (cut,))
-            self._conn.commit()
+            self._commit()
 
     def prune_bad(self) -> int:
         """丢掉没有市值、地址空、倍数离谱的历史记录。"""
@@ -331,7 +353,7 @@ class CaStore:
                 )
                 """
             )
-            self._conn.commit()
+            self._commit()
         return dropped
 
     def remember(self, card: dict[str, Any], tokens: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -407,7 +429,7 @@ class CaStore:
                         now,
                     )
                 out.append(self._decorate(token, chain, address, card_id, caller_id, now, group_id))
-            self._conn.commit()
+            self._commit()
         return out
 
     def _heal_case(self, chain: str, address: str) -> None:
@@ -838,8 +860,13 @@ class CaStore:
         """
 
     def board(self, window: str = "all", now: int | None = None) -> list[dict[str, Any]]:
-        """window：all / 30d / 7d，按喊单时间截取。"""
-        stamp = int(now or time.time())
+        """window：all / 30d / 7d，按喊单时间截取。不指定 now 时走缓存。"""
+        if now is None:
+            key = window if window in BOARD_RANGES else "all"
+            return self._cached(f"board:{key}", lambda: self._board(key, int(time.time())))
+        return self._board(window, int(now))
+
+    def _board(self, window: str, stamp: int) -> list[dict[str, Any]]:
         span = BOARD_RANGES.get(window, KEEP_SECONDS)
         with self._lock:
             rows = self._conn.execute(self._call_join_sql(), (stamp - span,)).fetchall()
@@ -1012,6 +1039,29 @@ class CaStore:
             )
         )"""
 
+    def _commit(self) -> None:
+        self._conn.commit()
+        self._version += 1
+
+    def _cached(self, key: str, build: Any) -> Any:
+        hit = self._cache.get(key)
+        now = time.time()
+        if hit and hit[0] == self._version and now - hit[1] < BOARD_CACHE_TTL:
+            return hit[2]
+        value = build()
+        self._cache[key] = (self._version, now, value)
+        return value
+
+    def _unsettled_keys_sql(self) -> str:
+        """未结算喊单涉及的代币（走 settled 索引）。参数：喊单时间上下界 ×2。"""
+        return """
+            SELECT chain, address FROM ca_calls
+            WHERE settled = 0 AND called_at <= ? AND called_at >= ?
+            UNION
+            SELECT chain, address FROM ca_group_firsts
+            WHERE settled = 0 AND first_at <= ? AND first_at >= ?
+        """
+
     def _dormant_sql(self) -> str:
         return "(t.last_at < ? AND t.last_mcap < ?)"
 
@@ -1020,31 +1070,30 @@ class CaStore:
 
         1. 6 小时内的新喊单还没首结算的，喊单 60 秒后优先；
         2. 其余刷完后冻结：最后被喊 6 小时内冻结 15 分钟，3 天内 1 小时，更早 6 小时；
-        3. 超过 24 小时没人喊、现市值不到 1.5 万的休眠，直到再被喊到。
+        3. 超过 24 小时没人喊、现市值不到 1.5 万的休眠，直到再被喊到；
+        4. 超过 7 天没人喊的定格，不再自动刷新。
         """
         stamp = int(now or time.time())
         cols = "t.chain, t.address, t.first_at, t.last_at, t.last_mcap, t.last_price"
         base = "t.first_mcap > 0 AND IFNULL(t.address, '') != ''"
-        fresh = self._unsettled_sql(
-            "AND c.called_at <= ? AND c.called_at >= ?",
-            "AND g.first_at <= ? AND g.first_at >= ?",
-        )
         window = (stamp - SETTLE_DELAY, stamp - SETTLE_WINDOW)
         with self._lock:
             row = self._conn.execute(
                 f"""
-                SELECT {cols} FROM ca_tokens t
-                WHERE {base} AND t.refreshed_at <= ? AND {fresh}
+                SELECT {cols} FROM ({self._unsettled_keys_sql()}) u
+                JOIN ca_tokens t ON t.chain = u.chain AND t.address = u.address
+                WHERE {base} AND t.refreshed_at <= ?
                 ORDER BY t.last_at DESC LIMIT 1
                 """,
-                (stamp - SETTLE_RETRY, *window, *window),
+                (*window, *window, stamp - SETTLE_RETRY),
             ).fetchone()
             if row is not None:
                 return dict(row)
             bands = (
                 (stamp - HOT_AGE, stamp + 1, stamp - REFRESH_HOT),
                 (stamp - WARM_AGE, stamp - HOT_AGE, stamp - REFRESH_WARM),
-                (0, stamp - WARM_AGE, stamp - REFRESH_COLD),
+                # 冷层只到 7 天：更早的币定格，不再自动刷新。
+                (stamp - FINAL_AGE, stamp - WARM_AGE, stamp - REFRESH_COLD),
             )
             for min_last, max_last, max_refreshed in bands:
                 row = self._conn.execute(
@@ -1103,7 +1152,7 @@ class CaStore:
                 "UPDATE ca_tokens SET refreshed_at = ? WHERE chain = ? AND address = ?",
                 (int(now or time.time()), _text(chain).lower() or "_", _addr(address)),
             )
-            self._conn.commit()
+            self._commit()
 
     def apply_quote(
         self,
@@ -1188,7 +1237,7 @@ class CaStore:
                 """,
                 (symbol, name, first, ath, last, stamp, mark, price, price, chain, address),
             )
-            self._conn.commit()
+            self._commit()
         return changed or (first, ath, last) != before
 
     def _apply_since_ath(
@@ -1343,7 +1392,7 @@ class CaStore:
                     "INSERT OR REPLACE INTO ca_purged (start, end, purged_at) VALUES (?, ?, ?)",
                     (int(start), int(end), int(time.time())),
                 )
-                self._conn.commit()
+                self._commit()
         return {"calls": calls, "groupFirsts": groups, "tokens": tokens}
 
     def vacuum(self) -> int:
@@ -1356,7 +1405,11 @@ class CaStore:
         return int(self._conn.execute(sql, params).fetchone()[0] or 0)
 
     def stats(self, now: int | None = None) -> dict[str, Any]:
-        stamp = int(now or time.time())
+        if now is None:
+            return dict(self._cached("stats", lambda: self._stats(int(time.time()))))
+        return self._stats(int(now))
+
+    def _stats(self, stamp: int) -> dict[str, Any]:
         live = "SELECT COUNT(*) FROM ca_tokens t WHERE t.first_mcap > 0"
         with self._lock:
             tokens = self._count(live)
@@ -1368,9 +1421,17 @@ class CaStore:
                 """
             )
             last_refresh = self._count("SELECT COALESCE(MAX(refreshed_at), 0) FROM ca_tokens")
-            settling = self._count(f"{live} AND {self._unsettled_sql()}")
+            settling = self._count(
+                f"SELECT COUNT(*) FROM ({self._unsettled_keys_sql()})",
+                (stamp, 0, stamp, 0),
+            )
             dormant = self._count(
                 f"{live} AND {self._dormant_sql()}", (stamp - DORMANT_AGE, DORMANT_MCAP)
+            )
+            # 定格里不重复算已经休眠的。
+            final = self._count(
+                f"{live} AND t.last_at < ? AND NOT {self._dormant_sql()}",
+                (stamp - FINAL_AGE, stamp - DORMANT_AGE, DORMANT_MCAP),
             )
         return {
             "tokens": tokens,
@@ -1380,6 +1441,8 @@ class CaStore:
             "settling": settling,
             "dormant": dormant,
             "dormantMcap": DORMANT_MCAP,
+            "final": final,
+            "finalDays": FINAL_AGE // 86400,
             "pendingHours": PENDING_AGE // 3600,
         }
 

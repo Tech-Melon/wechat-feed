@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections import deque
 from typing import Any
 
 from .castore import CaStore
 from .store import CardStore
+
+# 榜单变化推送的最小间隔（秒）。几万个币时后台每秒都可能有变化，前端没必要跟着重算。
+BOARD_PUSH_GAP = 5.0
 
 
 class Hub:
@@ -23,6 +27,9 @@ class Hub:
         self._order: deque[str] = deque()
         self._cards: dict[str, dict[str, Any]] = {}
         self._subscribers: set[asyncio.Queue[dict[str, Any]]] = set()
+        # 榜单变化推送节流：最多每 5 秒一次，期间的变化合并成一次补发。
+        self._board_sent = 0.0
+        self._board_timer: asyncio.TimerHandle | None = None
         self._status: dict[str, Any] = {
             "upstream": "idle",
             "detail": "还没有连接微信数据服务",
@@ -133,6 +140,25 @@ class Hub:
         self._subscribers.discard(queue)
 
     def notify_board(self) -> None:
+        now = time.monotonic()
+        wait = BOARD_PUSH_GAP - (now - self._board_sent)
+        if wait <= 0:
+            self._board_sent = now
+            self._broadcast({"type": "ca-board"})
+            return
+        if self._board_timer is not None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._board_sent = now
+            self._broadcast({"type": "ca-board"})
+            return
+        self._board_timer = loop.call_later(wait, self._flush_board)
+
+    def _flush_board(self) -> None:
+        self._board_timer = None
+        self._board_sent = time.monotonic()
         self._broadcast({"type": "ca-board"})
 
     def _broadcast(self, event: dict[str, Any]) -> None:

@@ -1481,3 +1481,10 @@ body.is-board .ca-strip { display: none; }
 .ca-refresh-status { color: var(--muted); font-size: 12px; }
 .ca-refresh-bar { width: 120px; height: 6px; border-radius: 6px; background: #f2f4f7; overflow: hidden; }
 .ca-refresh-bar i { display: block; height: 100%; background: #0f9f6e; transition: width 0.4s; }
+
+.ca-more {
+  display: block; width: 100%; margin-top: 8px; height: 36px; border-radius: 12px;
+  border: 1px dashed #d0d5dd; background: #f8fafc; color: #344054; font: inherit; font-size: 13px; cursor: pointer;
+}
+.ca-more:hover { border-color: #0f9f6e; color: #067647; }
+.ca-more:focus-visible { outline: 2px solid #0f9f6e; outline-offset: 2px; }

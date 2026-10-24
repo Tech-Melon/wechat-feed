@@ -2106,3 +2106,77 @@ def test_manual_timeout_scales_with_tokens() -> None:
     assert manual_timeout(1) == MANUAL_MIN
     assert manual_timeout(81) == 60 + 81 * 6
     assert manual_timeout(10_000) == MANUAL_MAX
+
+
+def test_final_freeze_after_seven_days(tmp_path: Path) -> None:
+    from wechat_feed.castore import FINAL_AGE
+
+    store = CaStore(tmp_path / "ca.db")
+    now = 1_800_000_000 + 30 * 86400
+    old = "0x" + "e1" * 20
+    store.remember(
+        _call_card("o", "wxid_o", now - FINAL_AGE - 3600),
+        [{"address": old, "chain": "bsc", "marketCap": 80_000}],
+    )
+    store._conn.execute("UPDATE ca_calls SET settled = 1")
+    store._conn.execute("UPDATE ca_group_firsts SET settled = 1")
+    store._conn.execute("UPDATE ca_tokens SET refreshed_at = 0")
+    store._conn.commit()
+    # 7 天前的币，市值再高也不自动刷新。
+    assert store.next_due(now=now) is None
+    assert store.stats(now=now)["final"] == 1
+    # 手动刷新照样能选到。
+    assert [r["address"] for r in store.refresh_targets("wxid_o", "range", "all", now=now)] == [old]
+    # 再被喊到就恢复（新喊单先首结算）。
+    store.remember(
+        _call_card("o2", "wxid_p", now), [{"address": old, "chain": "bsc", "marketCap": 90_000}]
+    )
+    assert store.next_due(now=now + 60)["address"] == old
+
+
+def test_board_cache_invalidates_on_write(tmp_path: Path) -> None:
+    import time
+
+    store = CaStore(tmp_path / "ca.db")
+    at = int(time.time()) - 86400
+    store.remember(
+        _call_card("c1", "wxid_a", at),
+        [{"address": "0x" + "a7" * 20, "chain": "bsc", "marketCap": 1000}],
+    )
+    first = store.board()
+    assert store.board() is first  # 命中缓存
+    store.remember(
+        _call_card("c2", "wxid_b", at),
+        [{"address": "0x" + "a8" * 20, "chain": "bsc", "marketCap": 1000}],
+    )
+    second = store.board()
+    assert second is not first
+    assert {r["userId"] for r in second} == {"wxid_a", "wxid_b"}
+    plan = store._conn.execute(
+        "EXPLAIN QUERY PLAN SELECT * FROM ca_calls WHERE caller_id = ? AND called_at >= ?", ("x", 0)
+    ).fetchall()
+    assert any("idx_ca_calls_caller" in str(tuple(r)) for r in plan)
+
+
+def test_board_push_is_throttled() -> None:
+    from wechat_feed import hub as hub_mod
+
+    async def run() -> list[dict]:
+        hub = Hub()
+        queue = hub.subscribe()
+        old = hub_mod.BOARD_PUSH_GAP
+        hub_mod.BOARD_PUSH_GAP = 0.3
+        try:
+            for _ in range(20):
+                hub.notify_board()
+            await asyncio.sleep(0.5)
+        finally:
+            hub_mod.BOARD_PUSH_GAP = old
+        out = []
+        while not queue.empty():
+            out.append(queue.get_nowait())
+        return out
+
+    events = asyncio.run(run())
+    # 20 次变化：立即推 1 次，节流期结束补 1 次。
+    assert [e["type"] for e in events] == ["ca-board", "ca-board"]
