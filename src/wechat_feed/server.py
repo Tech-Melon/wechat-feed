@@ -106,6 +106,7 @@ async def _idle_ca_refresh(
                 since=int(row.get("first_at") or 0),
                 last_mcap=float(row.get("last_mcap") or 0),
                 last_price=float(row.get("last_price") or 0),
+                anchors=cas.anchors(str(row.get("chain") or ""), str(row.get("address") or "")),
             )
             cas.apply_quote(
                 str(row.get("chain") or ""),

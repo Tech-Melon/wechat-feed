@@ -211,9 +211,7 @@ def parse_search(
         for row in coins
         if str(row.get("address") or row.get("token_address") or "").lower() == needle
     ]
-    matched_wallets = [
-        row for row in wallets if str(row.get("address") or "").lower() == needle
-    ]
+    matched_wallets = [row for row in wallets if str(row.get("address") or "").lower() == needle]
     return matched_coins, matched_wallets
 
 
@@ -526,12 +524,63 @@ def kline_resolution(created_at: int, now: int | None = None) -> str:
     return "1d"
 
 
+_HOUR = 3600
+_DAY = 86400
+# GMGN 单次最多回 100 根，且是窗口内最新的 100 根；日线按 90 天一段拉。
+_DAY_CHUNK = 90 * _DAY
+_MAX_ANCHORS = 4
+
+
+def _ceil_to(ts: int, span: int) -> int:
+    return -(-int(ts) // span) * span
+
+
+def kline_plan(anchors: list[int], now: int) -> list[tuple[str, int, int]]:
+    """喊单后 K 线分段：喊单→整点 1m，整点→UTC 0 点 1h，之后 1d。
+
+    GMGN 的柱按 UTC 对齐，粗柱只从喊单后的整点/0 点开始拉，
+    这样不会有任何一根粗柱跨过喊单时间、把喊单前的高点带进来。
+    """
+    stamp = int(now)
+    points = sorted({int(a) for a in anchors if 0 < int(a or 0) < stamp})
+    if not points:
+        return []
+    if len(points) > _MAX_ANCHORS:
+        points = points[:1] + points[-(_MAX_ANCHORS - 1) :]
+    segments: list[tuple[str, int, int]] = []
+    for anchor in points:
+        hour = _ceil_to(anchor, _HOUR)
+        day = _ceil_to(anchor, _DAY)
+        # 往前多拉 60 秒，确保喊单所在那根 1m 在窗口里。
+        segments.append(("1m", anchor - 60, min(hour, stamp)))
+        segments.append(("1h", hour, min(day, stamp)))
+    start = _ceil_to(points[0], _DAY)
+    while start < stamp:
+        end = min(start + _DAY_CHUNK, stamp)
+        segments.append(("1d", start, end))
+        start = end
+    out: list[tuple[str, int, int]] = []
+    for seg in segments:
+        res, lo, hi = seg
+        if lo >= hi or seg in out:
+            continue
+        # 同粒度被别段完全覆盖的不再重复拉。
+        if any(r == res and a <= lo and hi <= b and (a, b) != (lo, hi) for r, a, b in segments):
+            continue
+        out.append(seg)
+    return out
+
+
 def kline_bars(
     payload: dict[str, Any] | None,
     current_mcap: float = 0.0,
     current_price: float = 0.0,
 ) -> list[tuple[int, float]]:
-    """K 线 → [(时间, 市值高点)]。价格柱用 现市值 × 高点/现价。"""
+    """K 线 → [(时间, 市值高点)]。
+
+    GMGN 的 high 是价格：同 Ave，市值 = 高点价格 × 供应量，供应量 = 现市值 / 现价。
+    没有价格锚点时才把 high 当市值。
+    """
     if not isinstance(payload, dict):
         return []
     raw_data = payload.get("data")
@@ -539,11 +588,7 @@ def kline_bars(
     rows: list[Any] = []
     if isinstance(data, dict):
         raw = (
-            data.get("list")
-            or data.get("klines")
-            or data.get("items")
-            or data.get("points")
-            or []
+            data.get("list") or data.get("klines") or data.get("items") or data.get("points") or []
         )
         rows = raw if isinstance(raw, list) else []
     elif isinstance(data, list):
@@ -563,10 +608,10 @@ def kline_bars(
             bar_time = _unix_seconds(row[0])
             high = _num(row[2])
         value = mcap
-        if value <= 0 and high >= 1:
-            value = high
-        elif value <= 0 and high > 0 and current_price > 0 and current_mcap > 0:
+        if value <= 0 and high > 0 and current_price > 0 and current_mcap > 0:
             value = current_mcap * (high / current_price)
+        elif value <= 0 and high >= 1:
+            value = high
         if value <= 0:
             continue
         if value < 1 and current_mcap >= 100:
@@ -584,11 +629,7 @@ def kline_last_close(payload: dict[str, Any] | None) -> float:
     rows: list[Any] = []
     if isinstance(data, dict):
         raw = (
-            data.get("list")
-            or data.get("klines")
-            or data.get("items")
-            or data.get("points")
-            or []
+            data.get("list") or data.get("klines") or data.get("items") or data.get("points") or []
         )
         rows = raw if isinstance(raw, list) else []
     elif isinstance(data, list):
@@ -606,22 +647,20 @@ def kline_last_close(payload: dict[str, Any] | None) -> float:
     return close
 
 
-def peak_since(
-    bars: list[tuple[int, float]],
-    since_ts: int = 0,
-    interval_s: int = 0,
-) -> float:
-    """喊单之后的最高。柱开盘早于喊单、但收盘盖住喊单的那根也算（否则日线/4h 会漏掉当根高峰）。"""
+def peak_since(bars: list[tuple[int, float]], since_ts: int = 0) -> float:
+    """喊单之后的最高（同 Ave：喊单所在那根 1m 也算）。
+
+    只认开盘时间 >= 喊单前 60 秒的柱：喊单所在的 1m 柱算进来，
+    跨过喊单的 1h/1d 粗柱一律不算，避免把开盘拉盘的高点记到喊单人头上。
+    """
     peak = 0.0
     since = int(since_ts or 0)
-    span = int(interval_s or 0)
+    floor = since - 60 if since else 0
     for bar_time, value in bars:
         if value <= 0:
             continue
-        if since and bar_time:
-            end = bar_time + span if span else bar_time
-            if end < since:
-                continue
+        if floor and bar_time < floor:
+            continue
         peak = max(peak, value)
     return peak
 
@@ -633,6 +672,16 @@ def ath_from_kline(
     since: int = 0,
 ) -> float:
     return peak_since(kline_bars(payload, current_mcap, current_price), since)
+
+
+def merge_bars(*groups: list[tuple[int, float]]) -> list[tuple[int, float]]:
+    """多段多粒度的柱合并：同一开盘时间取高者，按时间排序。"""
+    merged: dict[int, float] = {}
+    for bars in groups:
+        for bar_time, value in bars:
+            if value > merged.get(bar_time, 0.0):
+                merged[bar_time] = value
+    return sorted(merged.items())
 
 
 def _unix_seconds(value: Any) -> int:
@@ -650,9 +699,7 @@ def _from_search(row: dict[str, Any], address: str) -> dict[str, Any]:
     chain = gmgn_api_chain(str(row.get("chain") or row.get("network") or ""))
     price = _num(row.get("price"))
     liquidity = _num(row.get("liquidity"))
-    market_cap = _num(
-        row.get("market_cap") or row.get("usd_market_cap") or row.get("mcp")
-    )
+    market_cap = _num(row.get("market_cap") or row.get("usd_market_cap") or row.get("mcp"))
     ath_mcap = _num(row.get("ath_market_cap") or row.get("history_highest_market_cap"))
     holders = int(_num(row.get("holder_count")))
     created = int(
@@ -791,7 +838,8 @@ _GMGN_WEIGHTS = {
     "/v1/token/holders": 5,
     "/v1/token/traders": 5,
     "/v1/market/search": 1,
-    "/v1/market/token_kline": 2,
+    # 官方表未列，实测 x-ratelimit-remaining 每次扣 3。
+    "/v1/market/token_kline": 3,
 }
 _CACHE_TTL = 2.0
 _CACHE_MAX = 2000
@@ -914,8 +962,12 @@ class TokenIndex:
         since: int = 0,
         last_mcap: float = 0.0,
         last_price: float = 0.0,
+        anchors: list[int] | None = None,
     ) -> dict[str, Any] | None:
-        """空闲刷新。已定链且有价格锚点时只打 K 线；否则 search 一次把价格写下。"""
+        """空闲刷新。已定链且有价格锚点时只打 K 线；否则 search 一次把价格写下。
+
+        anchors 是各喊单/各群首喊时间，K 线按它们分段，保证每个喊单人都只算喊单之后。
+        """
         if os.environ.get("WECHAT_FEED_DISABLE_TOKEN") == "1":
             return None
         address = str(address or "").strip()
@@ -931,14 +983,14 @@ class TokenIndex:
                     "marketCap": last_mcap,
                     "priceUsd": last_price,
                 }
-                return await self._fill_ath(token, force=True, since=since)
+                return await self._fill_ath(token, force=True, since=since, anchors=anchors)
             coins, _wallets = await self._search_hits(address, chain_norm)
             if not coins:
                 return None
             picked = _best_coin(coins) if len(coins) > 1 else coins[0]
             token = _from_search(picked, address)
             if token:
-                token = await self._fill_ath(token, force=True, since=since)
+                token = await self._fill_ath(token, force=True, since=since, anchors=anchors)
             return token
         finally:
             self._live = max(0, self._live - 1)
@@ -1096,7 +1148,7 @@ class TokenIndex:
         now: int,
         current_mcap: float,
         current_price: float,
-    ) -> list[tuple[int, float]]:
+    ) -> tuple[list[tuple[int, float]], float, dict[str, Any] | None]:
         payload = await self._gmgn_call(
             "/v1/market/token_kline",
             {
@@ -1110,12 +1162,39 @@ class TokenIndex:
         bars = kline_bars(payload, current_mcap, current_price)
         return bars, kline_last_close(payload), payload
 
+    async def _since_bars(
+        self,
+        chain: str,
+        address: str,
+        anchors: list[int],
+        now: int,
+        current_mcap: float,
+        current_price: float,
+    ) -> tuple[list[tuple[int, float]], float]:
+        """按喊单锚点分段拉 K 线，合并成一份喊单后可用的柱，顺带给出最新收盘价。"""
+        groups: list[list[tuple[int, float]]] = []
+        last_close = 0.0
+        last_end = 0
+        for resolution, lo, hi in kline_plan(anchors, now):
+            bars, close, payload = await self._kline_fetch(
+                chain, address, resolution, lo, hi, current_mcap, current_price
+            )
+            if payload is None:
+                # 任一段失败（限频/鉴权）就整份作废，免得用残缺的柱覆盖已有高点。
+                return [], 0.0
+            groups.append(bars)
+            if close > 0 and hi >= last_end:
+                last_close = close
+                last_end = hi
+        return merge_bars(*groups), last_close
+
     async def _fill_ath(
         self,
         token: dict[str, Any],
         *,
         force: bool = False,
         since: int = 0,
+        anchors: list[int] | None = None,
     ) -> dict[str, Any]:
         existing = _num(token.get("athMarketCap"))
         if existing > 0 and not force:
@@ -1126,18 +1205,29 @@ class TokenIndex:
             return token
         created = int(token.get("createdAt") or 0)
         now = int(time.time())
-        start = int(since or 0) or (created if created > 0 else now - 180 * 86400)
-        resolution = kline_resolution(start, now)
-        span = _KLINE_SPAN.get(resolution, 0)
-        fetch_from = max(0, start - span)
         current_mcap = _num(token.get("marketCap"))
         current_price = _num(token.get("priceUsd") or token.get("price"))
-        bars, last_close, _payload = await self._kline_fetch(
-            chain, address, resolution, fetch_from, now, current_mcap, current_price
-        )
-        token["klineBars"] = bars
-        token["klineInterval"] = span
-        peak = peak_since(bars, start, span)
+        points = [int(a) for a in (anchors or []) if int(a or 0) > 0]
+        if since:
+            points.append(int(since))
+        if points:
+            # 喊单后的高点：分段细粒度，粗柱不跨喊单时间。
+            start = min(points)
+            bars, last_close = await self._since_bars(
+                chain, address, points, now, current_mcap, current_price
+            )
+            token["klineBars"] = bars
+            token["klineInterval"] = 0
+        else:
+            # 新币首次解析只要历史 ATH 展示，一次请求即可。
+            start = created if created > 0 else now - 180 * 86400
+            resolution = kline_resolution(start, now)
+            span = _KLINE_SPAN.get(resolution, 0)
+            bars, last_close, _payload = await self._kline_fetch(
+                chain, address, resolution, max(0, start - span), now, current_mcap, current_price
+            )
+            start = 0
+        peak = peak_since(bars, start)
         if last_close > 0 and current_price > 0 and current_mcap > 0:
             token["marketCap"] = current_mcap * (last_close / current_price)
             token["priceUsd"] = last_close

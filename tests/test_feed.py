@@ -33,7 +33,10 @@ from wechat_feed.tokens import (
     format_tax,
     gmgn_api_chain,
     gmgn_token_url,
+    kline_bars,
+    kline_plan,
     kline_resolution,
+    merge_bars,
     parse_search,
     peak_since,
 )
@@ -366,14 +369,59 @@ def test_candidate_chains_prefers_dex_then_kind() -> None:
     assert kline_resolution(int(__import__("time").time()) - 120) == "1m"
     assert kline_resolution(int(__import__("time").time()) - 2400) == "5m"
     assert kline_resolution(int(__import__("time").time()) - 80000) == "4h"
-    assert ath_from_kline(
-        {"data": {"list": [{"high": 0.002}, {"high": 0.005}]}},
-        current_mcap=10_000,
-        current_price=0.001,
-    ) == 50_000
+    assert (
+        ath_from_kline(
+            {"data": {"list": [{"high": 0.002}, {"high": 0.005}]}},
+            current_mcap=10_000,
+            current_price=0.001,
+        )
+        == 50_000
+    )
     assert peak_since([(100, 10), (200, 50), (300, 20)], 200) == 50
-    assert peak_since([(100, 10), (200, 50), (300, 20)], 250) == 20
-    assert peak_since([(100, 10), (200, 50), (300, 20)], 250, 100) == 50
+    # 喊单所在那根 1m（开盘早于喊单不到 60 秒）算，更早的不算。
+    assert peak_since([(100, 10), (200, 50), (300, 20)], 250) == 50
+    assert peak_since([(100, 10), (200, 50), (300, 20)], 270) == 20
+
+
+def test_kline_plan_never_lets_coarse_bar_cross_call() -> None:
+    # AIPRO：10-21 20:20:17 喊单，开盘拉盘发生在喊单前的同一小时/同一天。
+    call = 1792585217
+    now = call + 3 * 86400
+    plan = kline_plan([call], now)
+    assert plan[0] == ("1m", call - 60, 1792587600)
+    assert plan[1] == ("1h", 1792587600, 1792627200)
+    assert plan[2] == ("1d", 1792627200, now)
+    for resolution, lo, _hi in plan:
+        if resolution != "1m":
+            assert lo >= call
+    # 开盘 258K 的 1h/1d 柱都在喊单前开盘，不能计入；喊单后 1m 峰值 96K 才是答案。
+    bars = merge_bars(
+        [(1792584000, 258_352.0)],  # 20:00 的 1h 柱
+        [(1792540800, 258_352.0)],  # 08:00 的 1d 柱
+        [(1792585200, 36_633.0), (1792586820, 96_438.0)],  # 1m
+        [(1792627200, 41_825.0)],
+    )
+    assert peak_since(bars, call) == 96_438.0
+    # 多个喊单人：每个锚点都有自己的 1m/1h 段，日线只拉一份。
+    late = call + 2 * 86400 + 777
+    multi = kline_plan([call, late], now)
+    assert ("1m", late - 60, _ceil_hour(late)) in multi
+    assert sum(1 for row in multi if row[0] == "1d") == 1
+    assert kline_plan([], now) == []
+    long_plan = kline_plan([call], call + 200 * 86400)
+    assert sum(1 for row in long_plan if row[0] == "1d") == 3
+
+
+def _ceil_hour(ts: int) -> int:
+    return -(-ts // 3600) * 3600
+
+
+def test_kline_bars_scales_price_high_to_mcap() -> None:
+    # GMGN 的 high 是价格，按 现市值/现价 的供应量换算市值。
+    payload = {"data": {"list": [{"time": 1792585260000, "high": "0.000070183418"}]}}
+    bars = kline_bars(payload, current_mcap=17_557.467, current_price=1.7557467e-05)
+    assert bars[0][0] == 1792585260
+    assert round(bars[0][1]) == 70_183
 
 
 def test_ca_store_tracks_first_call_and_board(tmp_path: Path) -> None:
@@ -468,7 +516,7 @@ def test_ca_store_tracks_first_call_and_board(tmp_path: Path) -> None:
             "klineBars": [
                 [1_800_000_000, 1000],
                 [1_800_000_050, 8000],
-                [1_800_000_150, 6000],
+                [1_800_000_120, 6000],
                 [1_800_000_200, 4000],
             ],
         },
@@ -700,7 +748,9 @@ def test_remote_image_hosts_are_allowlisted() -> None:
     assert allowed_sticker_url("https://szextshort.weixin.qq.com/x")
     assert not allowed_sticker_url("http://127.0.0.1:8765/secret")
     assert not allowed_sticker_url("https://evil.example/x")
-    assert allowed_emote_url("https://cdn.jsdelivr.net/gh/YiJio/emoji-chinese@1.1.0/wx/wx-new/default/wl.png")
+    assert allowed_emote_url(
+        "https://cdn.jsdelivr.net/gh/YiJio/emoji-chinese@1.1.0/wx/wx-new/default/wl.png"
+    )
     assert allowed_emote_url("https://res.wx.qq.com/mpres/htmledition/images/icon/emotion/1.gif")
     assert not allowed_emote_url("http://res.wx.qq.com/x.gif")
     assert allowed_chainicon_url("https://www.google.com/s2/favicons?sz=64&domain=solana.com")
@@ -1374,12 +1424,10 @@ def test_package_omits_local_data_and_api_key() -> None:
     assert "function setListenUsers" in app_js
     assert "function renderBoard" in app_js
     assert "ca-board" in app_js
-    assert "notify_board" in (ROOT / "src" / "wechat_feed" / "hub.py").read_text(
+    assert "notify_board" in (ROOT / "src" / "wechat_feed" / "hub.py").read_text(encoding="utf-8")
+    assert 'from": str(start * 1000)' in (ROOT / "src" / "wechat_feed" / "tokens.py").read_text(
         encoding="utf-8"
     )
-    assert "from\": str(start * 1000)" in (
-        ROOT / "src" / "wechat_feed" / "tokens.py"
-    ).read_text(encoding="utf-8")
     assert "_CACHE_TTL = 2.0" in (ROOT / "src" / "wechat_feed" / "tokens.py").read_text(
         encoding="utf-8"
     )
@@ -1393,21 +1441,11 @@ def test_package_omits_local_data_and_api_key() -> None:
     assert "function formatDateTime" in feed
     assert "force=True" in (ROOT / "src" / "wechat_feed" / "tokens.py").read_text(encoding="utf-8")
     assert "ca-pill score" in app_js
-    assert "peak_since" in (ROOT / "src" / "wechat_feed" / "tokens.py").read_text(
-        encoding="utf-8"
-    )
-    assert "klineBars" in (ROOT / "src" / "wechat_feed" / "castore.py").read_text(
-        encoding="utf-8"
-    )
-    assert "next_daily" in (ROOT / "src" / "wechat_feed" / "castore.py").read_text(
-        encoding="utf-8"
-    )
-    assert "since=since" in (ROOT / "src" / "wechat_feed" / "tokens.py").read_text(
-        encoding="utf-8"
-    )
-    assert "_KLINE_SPAN" in (ROOT / "src" / "wechat_feed" / "tokens.py").read_text(
-        encoding="utf-8"
-    )
+    assert "peak_since" in (ROOT / "src" / "wechat_feed" / "tokens.py").read_text(encoding="utf-8")
+    assert "klineBars" in (ROOT / "src" / "wechat_feed" / "castore.py").read_text(encoding="utf-8")
+    assert "next_daily" in (ROOT / "src" / "wechat_feed" / "castore.py").read_text(encoding="utf-8")
+    assert "since=since" in (ROOT / "src" / "wechat_feed" / "tokens.py").read_text(encoding="utf-8")
+    assert "_KLINE_SPAN" in (ROOT / "src" / "wechat_feed" / "tokens.py").read_text(encoding="utf-8")
     castore_py = (ROOT / "src" / "wechat_feed" / "castore.py").read_text(encoding="utf-8")
     assert "WIN_X = 1.5" in castore_py
     assert "涨幅 50%" in app_js
@@ -1420,7 +1458,7 @@ def test_package_omits_local_data_and_api_key() -> None:
     assert "wf-xlab" in feed
     assert "is-debut" in feed
     assert "ca_board" in (ROOT / "src" / "wechat_feed" / "config.py").read_text(encoding="utf-8")
-    assert "id=\"ca-board-on\"" in (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+    assert 'id="ca-board-on"' in (ROOT / "web" / "index.html").read_text(encoding="utf-8")
     assert "CA 发现榜" in (ROOT / "extension" / "popup.html").read_text(encoding="utf-8")
     assert "setCaBoard" in background
     assert "wf-fresh" in feed
@@ -1486,3 +1524,55 @@ def test_members_requires_direct(client: TestClient) -> None:
     assert missing.status_code == 400
     response = client.get("/api/groups/12345678@chatroom/members")
     assert response.status_code == 503
+
+
+def test_ca_store_keeps_solana_case(tmp_path: Path) -> None:
+    # base58 区分大小写，转小写后 GMGN 会报 invalid token_address。
+    store = CaStore(tmp_path / "ca.db")
+    sol = "4BcyEfuXVhMmQfRaEvPx7ZsKngoMeLCkHRq4AYe2YDgn"
+    evm = "0x" + "AB" * 20
+    card = {
+        "id": "s1",
+        "senderUsername": "wxid_s",
+        "senderName": "测",
+        "conversationId": "12345678@chatroom",
+        "createTime": 1_800_000_000,
+    }
+    store.remember(
+        card,
+        [
+            {"address": sol, "chain": "sol", "marketCap": 1000},
+            {"address": evm, "chain": "bsc", "marketCap": 1000},
+        ],
+    )
+    stored = {row[0] for row in store._conn.execute("SELECT address FROM ca_tokens")}
+    assert stored == {sol, evm.lower()}
+    assert store.anchors("sol", sol) == [1_800_000_000]
+    decorated = store.decorate_card({**card, "tokenCards": [{"address": sol, "chain": "sol"}]})
+    assert decorated["tokenCards"][0]["foundBy"] == "测"
+
+
+def test_ca_store_heals_lowercased_solana_rows(tmp_path: Path) -> None:
+    # 旧版存成小写的 sol 行，再次喊到原大小写时迁移，而不是另起一行重复计数。
+    store = CaStore(tmp_path / "ca.db")
+    sol = "4BcyEfuXVhMmQfRaEvPx7ZsKngoMeLCkHRq4AYe2YDgn"
+    card = {
+        "id": "h1",
+        "senderUsername": "wxid_h",
+        "senderName": "旧",
+        "conversationId": "12345678@chatroom",
+        "createTime": 1_800_000_000,
+    }
+    store.remember(card, [{"address": sol, "chain": "sol", "marketCap": 1000}])
+    for table in ("ca_tokens", "ca_calls", "ca_group_firsts"):
+        store._conn.execute(f"UPDATE {table} SET address = lower(address)")
+    store._conn.commit()
+    store.remember(
+        {**card, "id": "h2", "createTime": 1_800_000_500},
+        [{"address": sol, "chain": "sol", "marketCap": 2000}],
+    )
+    for table in ("ca_tokens", "ca_calls", "ca_group_firsts"):
+        rows = [r[0] for r in store._conn.execute(f"SELECT address FROM {table}")]
+        assert rows == [sol], table
+    by_id = {row["userId"]: row for row in store.board()}
+    assert by_id["wxid_h"]["calls"] == 1

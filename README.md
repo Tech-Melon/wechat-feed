@@ -101,9 +101,11 @@
 
 ### GMGN 限频
 
-每秒已用权重不超过套餐权重（免费版 5）：`market/search`、`token/info`、`token/security` 每次扣 1，`market/token_kline` 每次扣 2。裸 EVM 先打一次不带链的 search（官方会在 `coins[].chain` 里返回链）；只有这次没命中才补 bsc / eth / robinhood。search 已有链和市值就不再打 token/info；缺市值时 info 与 security 并行。结果缓存 2 秒。收到 429 先冷却 8 秒。升级套餐后设环境变量 `WECHAT_FEED_GMGN_RATE=<新权重>`。
+每秒已用权重不超过套餐权重（免费版 5）：`market/search`、`token/info`、`token/security` 每次扣 1，`market/token_kline` 每次扣 3（官方表未列，按响应头 `x-ratelimit-remaining` 实测）。限额按 Key 计，同一个 Key 不要同时跑两个实例或脚本。裸 EVM 先打一次不带链的 search（官方会在 `coins[].chain` 里返回链）；只有这次没命中才补 bsc / eth / robinhood。search 已有链和市值就不再打 token/info；缺市值时 info 与 security 并行。结果缓存 2 秒。收到 429 先冷却 8 秒。升级套餐后设环境变量 `WECHAT_FEED_GMGN_RATE=<新权重>`。
 
-排行榜空闲刷新：已定链且库里有价格时只打一条 K 线（权重 2），间隔约 2 秒；老数据缺价格才再 search 一次。拉榜本身读本机 `data/ca.db`，不打 OpenAPI。关掉「排行榜」开关后空闲刷新整段停掉。
+排行榜空闲刷新：已定链且库里有价格时只打 K 线（每段权重 3），间隔约 2 秒；老数据缺价格才再 search 一次。拉榜本身读本机 `data/ca.db`，不打 OpenAPI。关掉「排行榜」开关后空闲刷新整段停掉。
+
+排行榜倍数口径（同 Ave）：最高倍数 = 喊单之后的最高市值 / 喊单市值，当前倍数 = 现市值 / 喊单市值。GMGN K 线的 `high` 是价格，按「现市值 / 现价」得到的供应量换成市值。K 线按喊单时间分段拉：喊单 → 整点用 1m，整点 → UTC 0 点用 1h，之后用日线（每段 90 天，GMGN 单次最多回 100 根）。只认开盘时间不早于喊单前 60 秒的柱，所以跨过喊单的 1h / 日线粗柱不会把开盘拉盘的高点算到喊单人头上。
 
 ## 边界
 
@@ -128,6 +130,7 @@ uv run ruff check src tests scripts
 - `scripts/package.py`：检查版本号一致后生成 `dist/wechat-feed-<版本>.zip`。
 - `scripts/make_sounds.py`：重新生成内置提示音。
 - `scripts/make_icon.py`：重新生成产品图标（`web/favicon.*`、`extension/icon.*`）。
+- 一次性的调试/探测脚本放 `.scratch/`（已在 `.gitignore`），不要堆在根目录。
 
 ## 插件自测清单
 

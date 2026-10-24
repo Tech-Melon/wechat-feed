@@ -65,6 +65,12 @@ def _text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _addr(value: Any) -> str:
+    """EVM/Sui 的 0x 地址不分大小写，统一小写；Solana、Tron、TON 区分大小写，原样保留。"""
+    text = _text(value)
+    return text.lower() if text[:2].lower() == "0x" else text
+
+
 def format_x(value: float) -> str:
     number = _num(value)
     if number <= 0:
@@ -185,13 +191,9 @@ class CaStore:
             )
         call_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(ca_calls)")}
         if "ath_mcap" not in call_cols:
-            self._conn.execute(
-                "ALTER TABLE ca_calls ADD COLUMN ath_mcap REAL NOT NULL DEFAULT 0"
-            )
+            self._conn.execute("ALTER TABLE ca_calls ADD COLUMN ath_mcap REAL NOT NULL DEFAULT 0")
         if "call_price" not in call_cols:
-            self._conn.execute(
-                "ALTER TABLE ca_calls ADD COLUMN call_price REAL NOT NULL DEFAULT 0"
-            )
+            self._conn.execute("ALTER TABLE ca_calls ADD COLUMN call_price REAL NOT NULL DEFAULT 0")
         group_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(ca_group_firsts)")}
         if "ath_mcap" not in group_cols:
             self._conn.execute(
@@ -259,7 +261,7 @@ class CaStore:
                 "SELECT chain, address, first_mcap, ath_mcap, last_mcap FROM ca_tokens"
             ).fetchall()
             for row in rows:
-                address = _text(row["address"]).lower()
+                address = _addr(row["address"])
                 if not address or not is_sane(row["first_mcap"], row["ath_mcap"], row["last_mcap"]):
                     self._conn.execute(
                         "DELETE FROM ca_calls WHERE chain = ? AND address = ?",
@@ -312,12 +314,13 @@ class CaStore:
                     out.append(token)
                     continue
                 chain = _text(token.get("chain")).lower()
-                address = _text(token.get("address")).lower()
+                address = _addr(token.get("address"))
                 if not address:
                     out.append(token)
                     continue
                 if not chain:
                     chain = "_"
+                self._heal_case(chain, address)
                 mcap = _num(token.get("marketCap"))
                 ath = max(_num(token.get("athMarketCap")), mcap)
                 if mcap <= 0 and not self._has_token(chain, address):
@@ -365,11 +368,20 @@ class CaStore:
                         mcap,
                         now,
                     )
-                out.append(
-                    self._decorate(token, chain, address, card_id, caller_id, now, group_id)
-                )
+                out.append(self._decorate(token, chain, address, card_id, caller_id, now, group_id))
             self._conn.commit()
         return out
+
+    def _heal_case(self, chain: str, address: str) -> None:
+        """旧版把 Solana 等 base58 地址存成了小写，GMGN 不认；见到原大小写就原地改回来。"""
+        low = address.lower()
+        if low == address or self._has_token(chain, address) or not self._has_token(chain, low):
+            return
+        for table in ("ca_tokens", "ca_calls", "ca_group_firsts"):
+            self._conn.execute(
+                f"UPDATE {table} SET address = ? WHERE chain = ? AND address = ?",
+                (address, chain, low),
+            )
 
     def _has_token(self, chain: str, address: str) -> bool:
         row = self._conn.execute(
@@ -647,9 +659,7 @@ class CaStore:
             token["groupFoundGroup"] = grow["group_name"] or ""
             token["groupFoundAt"] = int(grow["first_at"] or 0)
             token["groupFoundCardId"] = grow["card_id"] or ""
-            token["groupNowX"] = (
-                (last / group_first) if group_first > 0 and last > 0 else 0.0
-            )
+            token["groupNowX"] = (last / group_first) if group_first > 0 and last > 0 else 0.0
             group_ath = _num(grow["ath_mcap"] if "ath_mcap" in grow.keys() else 0)
             if group_ath <= 0:
                 group_ath = last
@@ -691,7 +701,7 @@ class CaStore:
                 self._decorate(
                     dict(token),
                     _text(token.get("chain")).lower() or "_",
-                    _text(token.get("address")).lower(),
+                    _addr(token.get("address")),
                     card_id,
                     sender_id,
                     created_at,
@@ -946,7 +956,7 @@ class CaStore:
     ) -> None:
         stamp = int(now or time.time())
         chain = _text(chain).lower() or "_"
-        address = _text(address).lower()
+        address = _addr(address)
         if not address:
             return
         with self._lock:
@@ -979,11 +989,10 @@ class CaStore:
                 if last > 0 and (first <= 0 or last / first <= MAX_X):
                     ath = max(ath, last)
             if bars:
-                interval = int((quote or {}).get("klineInterval") or 0)
-                since_ath = peak_since(bars, first_at, interval)
+                since_ath = peak_since(bars, first_at)
                 if since_ath > 0 and (first <= 0 or since_ath / first <= MAX_X):
                     ath = max(since_ath, last)
-                self._apply_since_ath(chain, address, bars, last, interval)
+                self._apply_since_ath(chain, address, bars, last)
             settled = local_day_id(stamp) if settle else None
             self._conn.execute(
                 """
@@ -1008,14 +1017,13 @@ class CaStore:
         address: str,
         bars: list[tuple[int, float]],
         last: float,
-        interval_s: int = 0,
     ) -> None:
         """一份全局 K 线，按各用户/各群的喊单时间切片算 ATH，不再为每个群打接口。"""
         for call in self._conn.execute(
             "SELECT caller_id, called_at, mcap FROM ca_calls WHERE chain = ? AND address = ?",
             (chain, address),
         ).fetchall():
-            peak = peak_since(bars, int(call["called_at"] or 0), interval_s)
+            peak = peak_since(bars, int(call["called_at"] or 0))
             if peak <= 0:
                 peak = last
             call_mcap = _num(call["mcap"])
@@ -1032,7 +1040,7 @@ class CaStore:
             "SELECT group_id, first_at, mcap FROM ca_group_firsts WHERE chain = ? AND address = ?",
             (chain, address),
         ).fetchall():
-            peak = peak_since(bars, int(group["first_at"] or 0), interval_s)
+            peak = peak_since(bars, int(group["first_at"] or 0))
             if peak <= 0:
                 peak = last
             base = _num(group["mcap"])
@@ -1045,6 +1053,23 @@ class CaStore:
                 """,
                 (peak, chain, address, group["group_id"]),
             )
+
+    def anchors(self, chain: str, address: str) -> list[int]:
+        """该币所有喊单时间与各群首喊时间，K 线按它们分段拉。"""
+        chain = _text(chain).lower() or "_"
+        address = _addr(address)
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT called_at AS t FROM ca_calls WHERE chain = ? AND address = ?
+                UNION
+                SELECT first_at AS t FROM ca_group_firsts WHERE chain = ? AND address = ?
+                UNION
+                SELECT first_at AS t FROM ca_tokens WHERE chain = ? AND address = ?
+                """,
+                (chain, address, chain, address, chain, address),
+            ).fetchall()
+        return sorted({int(row["t"] or 0) for row in rows if int(row["t"] or 0) > 0})
 
     def stats(self) -> dict[str, Any]:
         stamp = int(time.time())
