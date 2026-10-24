@@ -141,8 +141,11 @@ function visibleMessages() {
 
 function renderRuntime() {
   const status = state.runtime.upstream || "idle";
+  const detail = state.runtime.detail || status;
   runtime.className = `runtime ${status === "live" ? "live" : status === "error" ? "error" : ""}`;
-  runtime.textContent = state.runtime.detail || status;
+  // 正常时只显示短状态，完整说明放悬停提示；异常时直接显示原因
+  runtime.textContent = status === "live" ? "实时连接中" : detail;
+  runtime.title = detail;
 }
 
 function renderMode() {
@@ -324,46 +327,141 @@ function renderMemberPanel(panel, groupId, members) {
   panel.append(filter, list);
 }
 
-function fillGroupList(box, storedKey) {
-  if (!box) return;
-  const top = box.scrollTop;
+/* ---------- 界面状态：折叠开关、群筛选词，存在本机 localStorage（群勾选本身仍存服务端设置） ---------- */
+const UI_KEY = "wechat-feed.ui";
+const ui = (() => {
+  try {
+    const saved = JSON.parse(localStorage.getItem(UI_KEY) || "{}");
+    return saved && typeof saved === "object" ? saved : {};
+  } catch (error) {
+    return {};
+  }
+})();
+ui.folds = ui.folds && typeof ui.folds === "object" ? ui.folds : {};
+
+function saveUi() {
+  try {
+    localStorage.setItem(UI_KEY, JSON.stringify(ui));
+  } catch (error) {
+    // 隐私模式 / 配额满：只是不记忆，不影响使用
+  }
+}
+
+/** 首次打开时的默认折叠：通路设置默认收起；还没有监控群时群聊管理默认展开 */
+function applyFolds() {
+  for (const fold of document.querySelectorAll("details[data-fold]")) {
+    const key = fold.dataset.fold;
+    const saved = ui.folds[key];
+    fold.open = typeof saved === "boolean"
+      ? saved
+      : key === "groups" && !(state.settings.groups || []).length;
+    fold.addEventListener("toggle", () => {
+      ui.folds[key] = fold.open;
+      saveUi();
+    });
+  }
+}
+
+function feedGroupCounts(storedKey) {
   const monitored = window.WechatFeed.monitoredGroupIds(state.settings);
   const stored = state.settings[storedKey] || [];
-  const selected = new Set(window.WechatFeed.selectedFeedGroups(stored, monitored));
-  const allOn = !stored.length;
-  box.replaceChildren();
-  const allLabel = document.createElement("label");
-  allLabel.className = "all";
-  const allBox = document.createElement("input");
-  allBox.type = "checkbox";
-  allBox.checked = allOn;
-  allLabel.append(allBox, document.createTextNode("全选监控群"));
-  allBox.addEventListener("change", () => {
-    if (!allBox.checked) {
-      allBox.checked = true;
+  if (!stored.length) return { allOn: true, text: "全选" };
+  const picked = window.WechatFeed.selectedFeedGroups(stored, monitored).filter((id) => monitored.includes(id));
+  return { allOn: false, text: `${picked.length}/${monitored.length}` };
+}
+
+function renderFoldSummaries() {
+  const groupsSum = document.querySelector("#groups-summary");
+  if (groupsSum) {
+    const total = (state.settings.groups || []).length;
+    groupsSum.textContent = total
+      ? `${total} 个监控群 · 全部消息 ${feedGroupCounts("all_feed_groups").text} · 只看 CA ${feedGroupCounts("ca_feed_groups").text}`
+      : "还没有监控群，展开后添加";
+  }
+  const settingsSum = document.querySelector("#settings-summary");
+  if (settingsSum) {
+    const mode = (key) => (state.settings[key] ? "只看 CA" : "全部");
+    const parts = [
+      `gmgn 插入 ${state.settings.gmgn_overlay ? `开 · ${mode("gmgn_ca_only")}` : "关"}`,
+      `网页浮窗 ${state.settings.float_panel ? `开 · ${mode("float_ca_only")}` : "关"}`,
+      `GMGN Key ${state.settings.has_gmgn_key ? "已保存" : "未填"}`,
+    ];
+    settingsSum.textContent = parts.join(" ｜ ");
+  }
+}
+
+/** 表头「全选」：勾上即全选（含以后新加的群）；已全选时不允许取消，改为逐个取消 */
+function headCheck(storedKey, title) {
+  const label = document.createElement("label");
+  label.className = "group-head-check";
+  const box = document.createElement("input");
+  box.type = "checkbox";
+  const { allOn, text } = feedGroupCounts(storedKey);
+  box.checked = allOn;
+  box.title = allOn ? "已全选，取消请逐个去掉" : "勾选 = 全选监控群";
+  box.addEventListener("change", () => {
+    if (!box.checked) {
+      box.checked = true;
       return;
     }
     toggleFeedGroup(storedKey, "");
   });
-  box.append(allLabel);
+  const name = document.createElement("span");
+  name.textContent = title;
+  const count = document.createElement("small");
+  count.textContent = text;
+  label.append(box, name, count);
+  return label;
+}
+
+function fillGroupTable(box) {
+  if (!box) return;
+  const top = box.scrollTop;
+  const monitored = window.WechatFeed.monitoredGroupIds(state.settings);
+  const pickedAll = new Set(window.WechatFeed.selectedFeedGroups(state.settings.all_feed_groups || [], monitored));
+  const pickedCa = new Set(window.WechatFeed.selectedFeedGroups(state.settings.ca_feed_groups || [], monitored));
+  const needle = String(ui.groupQuery || "").trim().toLowerCase();
+  box.replaceChildren();
+
+  const head = document.createElement("div");
+  head.className = "group-row group-head";
+  const headName = document.createElement("span");
+  headName.className = "group-name";
+  headName.textContent = "群";
+  const tail = document.createElement("span");
+  tail.className = "group-tail";
+  head.append(headName, headCheck("all_feed_groups", "全部消息"), headCheck("ca_feed_groups", "只看 CA"), tail);
+  box.append(head);
+
+  let shown = 0;
   for (const item of state.settings.groups || []) {
     if ((state.settings.blocked_groups || []).includes(item.id)) continue;
+    const name = groupLabel(item.id, item.name);
+    if (needle && !`${name} ${item.name || ""} ${item.id}`.toLowerCase().includes(needle)) continue;
+    shown += 1;
     const wrap = document.createElement("div");
     wrap.className = "group-item";
     const row = document.createElement("div");
     row.className = "group-row";
-    const label = document.createElement("label");
-    const check = document.createElement("input");
-    check.type = "checkbox";
-    check.checked = selected.has(item.id);
-    const name = groupLabel(item.id, item.name);
-    label.append(check, document.createTextNode(name));
+    const label = document.createElement("span");
+    label.className = "group-name";
+    label.textContent = name;
     label.title = `${item.id} · 双击改备注`;
-    check.addEventListener("change", () => toggleFeedGroup(storedKey, item.id));
     label.addEventListener("dblclick", (event) => {
       event.preventDefault();
       remarkGroup(item.id, name);
     });
+    const cell = (storedKey, picked, title) => {
+      const holder = document.createElement("label");
+      holder.className = "group-check";
+      holder.title = title;
+      const check = document.createElement("input");
+      check.type = "checkbox";
+      check.checked = picked.has(item.id);
+      check.addEventListener("change", () => toggleFeedGroup(storedKey, item.id));
+      holder.append(check);
+      return holder;
+    };
     const listen = window.WechatFeed.groupListenUsers(state.settings, item.id);
     const membersBtn = document.createElement("button");
     membersBtn.type = "button";
@@ -383,7 +481,16 @@ function fillGroupList(box, storedKey) {
     remove.addEventListener("click", () => {
       removeGroup(item.id).catch((error) => setNotice(error.message));
     });
-    row.append(label, membersBtn, remove);
+    const actions = document.createElement("span");
+    actions.className = "group-tail";
+    actions.append(membersBtn, remove);
+    row.classList.toggle("is-open", expandedGroups.has(item.id));
+    row.append(
+      label,
+      cell("all_feed_groups", pickedAll, "在「全部消息」里显示这个群"),
+      cell("ca_feed_groups", pickedCa, "在「只看 CA」里显示这个群"),
+      actions,
+    );
     wrap.append(row);
     if (expandedGroups.has(item.id)) {
       const panel = document.createElement("div");
@@ -403,12 +510,20 @@ function fillGroupList(box, storedKey) {
     }
     box.append(wrap);
   }
+  if (!shown) {
+    const empty = document.createElement("p");
+    empty.className = "notice group-empty";
+    empty.textContent = (state.settings.groups || []).length
+      ? "没有匹配的群，换个关键字再筛。"
+      : "还没有监控群。点下方「读取本机群」勾选，或手动填群 ID 添加。";
+    box.append(empty);
+  }
   box.scrollTop = top;
 }
 
 function renderGroups() {
-  fillGroupList(document.querySelector("#groups-all"), "all_feed_groups");
-  fillGroupList(document.querySelector("#groups-ca"), "ca_feed_groups");
+  fillGroupTable(document.querySelector("#groups"));
+  renderFoldSummaries();
 }
 
 async function toggleFeedGroup(storedKey, groupId) {
@@ -1242,6 +1357,7 @@ async function load() {
   ]);
   mergeSettings(settings);
   state.runtime = health.runtime || state.runtime;
+  applyFolds();
   render();
   await loadFeed({ reset: true, caOnly: Boolean(state.settings.ca_only) });
   loadFeed({ reset: true, caOnly: !state.settings.ca_only }).catch(() => {});
@@ -1252,6 +1368,14 @@ async function load() {
 query.addEventListener("input", () => {
   state.query = query.value;
   renderFeed();
+});
+
+const groupQuery = document.querySelector("#group-query");
+groupQuery.value = ui.groupQuery || "";
+groupQuery.addEventListener("input", () => {
+  ui.groupQuery = groupQuery.value;
+  saveUi();
+  renderGroups();
 });
 
 directoryQuery.addEventListener("input", () => {
@@ -1338,6 +1462,7 @@ document.querySelector("#demo").addEventListener("click", async () => {
 });
 
 document.querySelector("#clear").addEventListener("click", async () => {
+  if (!window.confirm("清空本地缓存的全部群消息记录？\n监控群、备注、星标等设置不受影响，此操作不可撤销。")) return;
   try {
     await readJson(await fetch("/api/messages", { method: "DELETE" }));
   } catch (error) {

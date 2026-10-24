@@ -52,17 +52,14 @@
         <span><b>CA 发现榜</b><small>关闭后不再为空闲刷新打 GMGN</small></span>
         <input id="ca-board" type="checkbox" class="toggle" />
       </label>
-      <details class="group-mgr" open>
-        <summary>群聊选择管理</summary>
-        <p class="hint">两套来源互不影响，可同时多选。全选表示包括以后新加的监控群。点「成员」可监听全员或只听部分人，也可星标、屏蔽某人。监控群消息仍全盘入库，这里只决定显示谁。</p>
-        <div class="gcol">
-          <h4>全部消息来源</h4>
-          <div id="groups-all" class="group-list"></div>
-        </div>
-        <div class="gcol">
-          <h4>只看 CA 来源</h4>
-          <div id="groups-ca" class="group-list"></div>
-        </div>
+      <details class="group-mgr" id="fold-groups">
+        <summary>
+          <b>群聊选择管理</b>
+          <small id="groups-summary"></small>
+        </summary>
+        <p class="hint">「全部」和「CA」两套来源互不影响；表头勾选 = 全选（包括以后新加的监控群）。点「成员」可监听全员或只听部分人，也可星标、屏蔽某人。监控群消息仍全盘入库，这里只决定显示谁。</p>
+        <input id="group-query" class="group-search" type="search" placeholder="筛选群名或 ID" />
+        <div id="groups" class="group-table"></div>
       </details>
     </section>
 

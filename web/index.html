@@ -8,7 +8,7 @@
     <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
     <link rel="icon" href="/assets/favicon.png" type="image/png" sizes="128x128" />
     <link rel="apple-touch-icon" href="/assets/favicon.png" />
-    <link rel="stylesheet" href="/assets/app.css?v=0.9.23" />
+    <link rel="stylesheet" href="/assets/app.css?v=0.9.24" />
   </head>
   <body>
     <header class="top">
@@ -35,6 +35,25 @@
       </nav>
     </header>
 
+    <section class="ca-strip" id="ca-strip">
+      <label class="ca-switch" title="关闭后不再为排行榜请求 GMGN">
+        <input id="ca-board-on" type="checkbox" />
+        <span>排行榜</span>
+      </label>
+      <button type="button" class="ca-strip-open" data-open-board>
+        <strong>CA 发现榜</strong>
+        <span id="ca-strip-count">还没有记录</span>
+      </button>
+      <div id="ca-strip-top" class="ca-strip-top"></div>
+      <button type="button" class="ca-open" data-open-board>打开排行榜</button>
+    </section>
+
+    <details class="fold settings-fold" id="fold-settings" data-fold="settings">
+      <summary>
+        <strong>显示通路与 Key</strong>
+        <span id="settings-summary" class="fold-sum"></span>
+      </summary>
+      <div class="fold-body">
     <section class="paths">
       <div class="path on">
         <div class="path-top">
@@ -71,6 +90,8 @@
       <button id="save-key" type="button">保存 Key</button>
       <span id="key-status" class="notice"></span>
     </section>
+      </div>
+    </details>
 
     <div id="dialog" class="dialog" hidden>
       <div class="dialog-card">
@@ -83,18 +104,6 @@
       </div>
     </div>
 
-    <section class="ca-strip" id="ca-strip">
-      <label class="ca-switch" title="关闭后不再为排行榜请求 GMGN">
-        <input id="ca-board-on" type="checkbox" />
-        <span>排行榜</span>
-      </label>
-      <button type="button" class="ca-strip-open" data-open-board>
-        <strong>CA 发现榜</strong>
-        <span id="ca-strip-count">还没有记录</span>
-      </button>
-      <div id="ca-strip-top" class="ca-strip-top"></div>
-      <button type="button" class="ca-open" data-open-board>打开排行榜</button>
-    </section>
     <section class="ca-page" id="ca-page" hidden>
       <header class="ca-page-head">
         <button type="button" class="ca-back" data-board-back>返回</button>
@@ -107,40 +116,37 @@
     </section>
 
     <section class="tools">
-      <section class="group-mgr">
-        <header>
+      <details class="fold group-mgr" id="fold-groups" data-fold="groups">
+        <summary>
           <strong>群聊选择管理</strong>
-          <p>两套来源互不影响，可同时多选。全选表示包括以后新加的监控群。展开群可看成员：监听全员或只听部分人，也可星标、屏蔽某人。监控群的消息仍会全盘入库，这里只决定显示谁。</p>
-        </header>
-        <div class="group-cols">
-          <div class="group-col" data-feed="all">
-            <h3>全部消息来源</h3>
-            <div class="group-list" id="groups-all"></div>
+          <span id="groups-summary" class="fold-sum"></span>
+        </summary>
+        <div class="fold-body">
+          <p class="group-hint">「全部消息」和「只看 CA」两套来源互不影响；表头勾选 = 全选（包括以后新加的监控群）。点「成员」可监听全员或只听部分人，也可星标、屏蔽某人；双击群名改备注。监控群的消息仍全部入库，这里只决定显示谁。</p>
+          <label class="search group-search">
+            <input id="group-query" type="search" placeholder="筛选已监控的群名或 ID" />
+          </label>
+          <div class="group-table" id="groups"></div>
+          <div id="blocked" class="blocked"></div>
+          <div class="tool-row">
+            <form id="add-form">
+              <input id="group-id" placeholder="群 ID，例如 12345678@chatroom" required />
+              <input id="group-name" placeholder="群备注，可选" />
+              <button type="submit">添加群</button>
+            </form>
+            <div class="actions">
+              <button id="load-groups" type="button">读取本机群</button>
+              <button id="demo" type="button">插入一条样例</button>
+              <button id="clear" type="button" class="danger" title="删除本地缓存的群消息记录（不影响监控群设置）">清空消息记录</button>
+            </div>
           </div>
-          <div class="group-col" data-feed="ca">
-            <h3>只看 CA 来源</h3>
-            <div class="group-list" id="groups-ca"></div>
-          </div>
+          <label class="search directory-search" hidden>
+            <input id="directory-query" type="search" placeholder="筛选本机群名称或 ID" />
+          </label>
+          <div id="directory" class="directory"></div>
         </div>
-      </section>
-      <div id="blocked" class="blocked"></div>
-      <div class="tool-row">
-        <form id="add-form">
-          <input id="group-id" placeholder="群 ID，例如 12345678@chatroom" required />
-          <input id="group-name" placeholder="群备注，可选" />
-          <button type="submit">添加群</button>
-        </form>
-        <div class="actions">
-          <button id="load-groups" type="button">读取本机群</button>
-          <button id="demo" type="button">插入一条样例</button>
-          <button id="clear" type="button">清空本地列表</button>
-        </div>
-      </div>
+      </details>
       <p id="notice" class="notice"></p>
-      <label class="search directory-search" hidden>
-        <input id="directory-query" type="search" placeholder="筛选本机群名称或 ID" />
-      </label>
-      <div id="directory" class="directory"></div>
     </section>
 
     <main id="feed" class="feed"></main>
@@ -149,7 +155,7 @@
       技术瓜群流 · 作者 <a href="https://x.com/0xTechMelon" target="_blank" rel="noreferrer">@0xTechMelon</a>
       · 更多产品见 <a href="https://docs.jishugua.top" target="_blank" rel="noreferrer">docs.jishugua.top</a>
     </footer>
-    <script src="/shared/feed.js?v=0.9.23"></script>
-    <script src="/assets/app.js?v=0.9.23"></script>
+    <script src="/shared/feed.js?v=0.9.24"></script>
+    <script src="/assets/app.js?v=0.9.24"></script>
   </body>
 </html>
