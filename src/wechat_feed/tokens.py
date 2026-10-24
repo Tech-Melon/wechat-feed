@@ -1080,17 +1080,22 @@ class TokenIndex:
         last_status = 0
         for attempt in range(2):
             queued = time.monotonic()
+            yield_ms = 0.0
             if background:
                 # 实时解析在跑就先让开；后台被 429 过的冷却期内不再打。
                 while self._live > 0:
                     await asyncio.sleep(0.2)
+                yield_ms = (time.monotonic() - queued) * 1000
                 if time.time() < self._bg_cooldown:
                     note("skipped")
                     return None
+                throttled = time.monotonic()
                 await self._rate.acquire(weight, reserve=_REALTIME_RESERVE)
             else:
+                throttled = time.monotonic()
                 await self._rate.acquire(weight)
-            wait_ms = (time.monotonic() - queued) * 1000
+            # 限速等待：等限频窗口腾出额度（后台还要给实时留 2，所以每 1.2 秒最多 1 条 K 线）。
+            wait_ms = (time.monotonic() - throttled) * 1000
             sent_at = time.monotonic()
             sent_wall = time.time()
             params = {
@@ -1111,6 +1116,7 @@ class TokenIndex:
                     "status": response.status_code,
                     "latency_ms": (time.monotonic() - sent_at) * 1000,
                     "wait_ms": wait_ms,
+                    "yield_ms": yield_ms,
                     "remaining": left,
                     "at": sent_wall,
                 }
@@ -1166,6 +1172,7 @@ class TokenIndex:
                     "exception",
                     latency_ms=(time.monotonic() - sent_at) * 1000,
                     wait_ms=wait_ms,
+                    yield_ms=yield_ms,
                     at=sent_wall,
                 )
                 logger.info("GMGN {} 失败: {}", path, type(exc).__name__)

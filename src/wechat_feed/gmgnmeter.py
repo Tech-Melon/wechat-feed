@@ -35,6 +35,8 @@ class Event:
     latency_ms: float
     wait_ms: float
     remaining: int | None
+    # 后台为实时解析让路的时间，和限速等待分开记。
+    yield_ms: float = 0.0
 
 
 def _pct(values: list[float], q: float) -> float:
@@ -104,6 +106,7 @@ class GmgnMeter:
         status: int = 0,
         latency_ms: float = 0.0,
         wait_ms: float = 0.0,
+        yield_ms: float = 0.0,
         remaining: int | None = None,
         at: float | None = None,
     ) -> None:
@@ -119,6 +122,7 @@ class GmgnMeter:
             latency_ms=float(latency_ms),
             wait_ms=float(wait_ms),
             remaining=remaining,
+            yield_ms=float(yield_ms),
         )
         with self._lock:
             self._events.append(event)
@@ -161,6 +165,7 @@ class GmgnMeter:
                     "background": 0,
                     "latencies": [],
                     "waits": [],
+                    "yields": [],
                     **{key: 0 for key in OUTCOMES},
                 },
             )
@@ -173,13 +178,16 @@ class GmgnMeter:
             if event.latency_ms > 0:
                 row["latencies"].append(event.latency_ms)
             row["waits"].append(event.wait_ms)
+            row["yields"].append(event.yield_ms)
         out_paths = []
         for row in paths.values():
             lat = row.pop("latencies")
             waits = row.pop("waits")
+            yields = row.pop("yields")
             row["avgMs"] = round(sum(lat) / len(lat), 1) if lat else 0.0
             row["p95Ms"] = round(_pct(lat, 0.95), 1)
             row["avgWaitMs"] = round(sum(waits) / len(waits), 1) if waits else 0.0
+            row["avgYieldMs"] = round(sum(yields) / len(yields), 1) if yields else 0.0
             row["share"] = round(row["weight"] / weight, 4) if weight else 0.0
             out_paths.append(row)
         out_paths.sort(key=lambda r: (-r["weight"], -r["calls"]))
@@ -246,6 +254,7 @@ class GmgnMeter:
                 "status": e.status,
                 "latencyMs": round(e.latency_ms, 1),
                 "waitMs": round(e.wait_ms, 1),
+                "yieldMs": round(e.yield_ms, 1),
                 "remaining": e.remaining,
             }
             for e in reversed(events[-RECENT:])

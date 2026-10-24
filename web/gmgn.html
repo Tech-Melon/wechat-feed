@@ -6,7 +6,7 @@
     <meta name="robots" content="noindex" />
     <title>GMGN 用量 · 技术瓜群流</title>
     <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
-    <link rel="stylesheet" href="/assets/gmgn.css?v=0.9.22" />
+    <link rel="stylesheet" href="/assets/gmgn.css?v=0.9.23" />
   </head>
   <body>
     <header class="gm-top">
@@ -72,10 +72,11 @@
           <h2>最近 40 次请求</h2>
           <p id="gm-totals" class="gm-muted"></p>
         </header>
+        <p class="gm-hint">「限速等待」是有意的节流：后台 K 线权重 3，每个 1.2 秒窗口还要给实时留 2，所以后台最多每 1.2 秒发一条，上一条结束后下一条通常要等 700 多毫秒。「让路实时」是新消息解析正在请求 GMGN 时后台主动让开的时间。两者都不会导致 429，实时请求不受影响。</p>
         <div class="gm-scroll"><table class="gm-table" id="gm-recent"></table></div>
       </section>
       <p class="gm-foot">实时面板看最近 1 小时，重启后从 data/gmgn.db 恢复；不记录 Key 和请求参数。</p>
     </main>
-    <script src="/assets/gmgn.js?v=0.9.22"></script>
+    <script src="/assets/gmgn.js?v=0.9.23"></script>
   </body>
 </html>

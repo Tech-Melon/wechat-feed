@@ -45,7 +45,8 @@ class GmgnStore:
                 status INTEGER NOT NULL DEFAULT 0,
                 latency_ms REAL NOT NULL DEFAULT 0,
                 wait_ms REAL NOT NULL DEFAULT 0,
-                remaining INTEGER
+                remaining INTEGER,
+                yield_ms REAL NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS idx_gmgn_events_at ON gmgn_events(at);
             CREATE TABLE IF NOT EXISTS gmgn_minute (
@@ -67,6 +68,11 @@ class GmgnStore:
             );
             """
         )
+        cols = {r[1] for r in self._conn.execute("PRAGMA table_info(gmgn_events)")}
+        if "yield_ms" not in cols:
+            self._conn.execute(
+                "ALTER TABLE gmgn_events ADD COLUMN yield_ms REAL NOT NULL DEFAULT 0"
+            )
         self._conn.commit()
 
     def write(self, events: list[Event], minute_stats: dict[int, tuple[int, int | None]]) -> None:
@@ -90,8 +96,9 @@ class GmgnStore:
             self._conn.executemany(
                 """
                 INSERT INTO gmgn_events
-                    (at, path, weight, kind, outcome, status, latency_ms, wait_ms, remaining)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (at, path, weight, kind, outcome, status,
+                     latency_ms, wait_ms, remaining, yield_ms)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -104,6 +111,7 @@ class GmgnStore:
                         e.latency_ms,
                         e.wait_ms,
                         e.remaining,
+                        e.yield_ms,
                     )
                     for e in events
                 ],
@@ -154,6 +162,7 @@ class GmgnStore:
                 latency_ms=float(r["latency_ms"] or 0),
                 wait_ms=float(r["wait_ms"] or 0),
                 remaining=r["remaining"],
+                yield_ms=float(r["yield_ms"] or 0),
             )
             for r in rows
         ]

@@ -1836,6 +1836,9 @@ def test_gmgn_meter_summary_peak_and_timeline() -> None:
     assert sum(b["background"] + b["realtime"] for b in snap["timeline"]) == 8
     assert sum(b["limited"] for b in snap["timeline"]) == 1
     assert snap["recent"][0]["outcome"] == "biz"
+    meter.record(kline, 3, background=True, outcome="ok", wait_ms=700, yield_ms=400)
+    split = meter.snapshot()["recent"][0]
+    assert (split["waitMs"], split["yieldMs"]) == (700, 400)
     assert snap["config"]["backgroundCap"] == 2.5
     assert snap["totals"]["calls"] == 4
 

@@ -162,7 +162,7 @@ function renderPaths(d) {
     table.innerHTML = `<tbody><tr><td class="l">这段时间没有请求 GMGN。</td></tr></tbody>`;
     return;
   }
-  const head = `<thead><tr><th scope="col">接口</th><th scope="col">请求</th><th scope="col">权重</th><th scope="col">权重占比</th><th scope="col">实时 / 后台</th><th scope="col">成功</th><th scope="col">业务错</th><th scope="col">429</th><th scope="col">失败</th><th scope="col">跳过</th><th scope="col">平均 / P95 耗时</th><th scope="col">平均排队</th></tr></thead>`;
+  const head = `<thead><tr><th scope="col">接口</th><th scope="col">请求</th><th scope="col">权重</th><th scope="col">权重占比</th><th scope="col">实时 / 后台</th><th scope="col">成功</th><th scope="col">业务错</th><th scope="col">429</th><th scope="col">失败</th><th scope="col">跳过</th><th scope="col">平均 / P95 耗时</th><th scope="col" title="等限频窗口腾出额度：后台要给实时留 2，所以每 1.2 秒最多 1 条 K 线，这是正常节流">平均限速等待</th><th scope="col" title="实时解析在跑时后台主动让开的时间">平均让路实时</th></tr></thead>`;
   const body = w.paths.map((r) => {
     const failed = r.error + r.exception + r.auth;
     return `<tr>
@@ -178,9 +178,10 @@ function renderPaths(d) {
       <td>${r.skipped}</td>
       <td>${num(r.avgMs, 0)} / ${num(r.p95Ms, 0)} ms</td>
       <td>${num(r.avgWaitMs, 0)} ms</td>
+      <td>${num(r.avgYieldMs, 0)} ms</td>
     </tr>`;
   }).join("");
-  const sum = `<tfoot><tr><th scope="row">合计</th><td>${w.calls}</td><td>${w.weight}</td><td>${num(w.weightPerSec)} 权重/秒</td><td colspan="8" class="l">占套餐 ${pct(w.usage)} · 任意 1 秒峰值 ${num(w.peak, 0)} / ${d.config.limit}</td></tr></tfoot>`;
+  const sum = `<tfoot><tr><th scope="row">合计</th><td>${w.calls}</td><td>${w.weight}</td><td>${num(w.weightPerSec)} 权重/秒</td><td colspan="9" class="l">占套餐 ${pct(w.usage)} · 任意 1 秒峰值 ${num(w.peak, 0)} / ${d.config.limit}</td></tr></tfoot>`;
   table.innerHTML = head + `<tbody>${body}</tbody>` + sum;
 }
 
@@ -193,7 +194,7 @@ function renderRecent(d) {
     table.innerHTML = `<tbody><tr><td class="l">还没有请求记录。</td></tr></tbody>`;
     return;
   }
-  const head = `<thead><tr><th scope="col">时间</th><th scope="col">接口</th><th scope="col">来源</th><th scope="col">结果</th><th scope="col">HTTP</th><th scope="col">权重</th><th scope="col">耗时</th><th scope="col">排队</th><th scope="col">服务端剩余</th></tr></thead>`;
+  const head = `<thead><tr><th scope="col">时间</th><th scope="col">接口</th><th scope="col">来源</th><th scope="col">结果</th><th scope="col">HTTP</th><th scope="col">权重</th><th scope="col">耗时</th><th scope="col" title="等限频窗口腾出额度（正常节流）">限速等待</th><th scope="col" title="实时解析在跑时后台主动让开的时间">让路实时</th><th scope="col">服务端剩余</th></tr></thead>`;
   const body = d.recent.map((e) => `<tr>
     <td class="l">${clock(e.at)}</td>
     <td class="l">${esc(NAMES[e.path] || e.path)}</td>
@@ -203,6 +204,7 @@ function renderRecent(d) {
     <td>${e.weight}</td>
     <td>${e.latencyMs ? `${num(e.latencyMs, 0)} ms` : "—"}</td>
     <td>${num(e.waitMs, 0)} ms</td>
+    <td>${e.yieldMs ? `${num(e.yieldMs, 0)} ms` : "—"}</td>
     <td>${e.remaining ?? "—"}</td>
   </tr>`).join("");
   table.innerHTML = head + `<tbody>${body}</tbody>`;
