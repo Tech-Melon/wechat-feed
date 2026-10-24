@@ -1,13 +1,18 @@
+import asyncio
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 from wechat_feed.castore import (
+    DORMANT_AGE,
+    PENDING_AGE,
+    REFRESH_HOT,
+    SETTLE_DELAY,
+    WATERMARK_OVERLAP,
     CaStore,
+    call_status,
     format_x,
-    in_daily_window,
-    local_day_start,
     wilson_lower,
 )
 from wechat_feed.config import (
@@ -196,7 +201,8 @@ def test_api_defaults_and_two_paths(client: TestClient) -> None:
     assert settings.json()["groups"] == []
     assert settings.json()["mcap_format"] == "cn"
     assert settings.json()["ca_board"] is True
-    assert settings.json()["ca_daily_hour"] == 22
+    assert "ca_daily_hour" not in settings.json()
+    assert "ca_daily_hour" not in normalize_settings({"ca_daily_hour": 22})
     patched = client.put("/api/settings", json={"mcap_format": "en"})
     assert patched.status_code == 200
     assert patched.json()["mcap_format"] == "en"
@@ -566,7 +572,7 @@ def test_ca_store_tracks_first_call_and_board(tmp_path: Path) -> None:
     assert store.prune_bad() >= 1
     store._conn.execute("UPDATE ca_tokens SET refreshed_at = 0")
     store._conn.commit()
-    stale = store.next_stale(now=1_800_000_200)
+    stale = store.next_due(now=1_800_000_200)
     assert stale is not None
     store.apply_quote(
         "bsc",
@@ -596,37 +602,228 @@ def test_ca_store_tracks_first_call_and_board(tmp_path: Path) -> None:
     assert first_again["tokenCards"][0]["isFirstCall"] is True
 
 
-def test_daily_settle_queue(tmp_path: Path) -> None:
+def _call_card(card_id: str, user: str, at: int, room: str = "11111111111@chatroom") -> dict:
+    return {
+        "id": card_id,
+        "senderUsername": user,
+        "senderName": user,
+        "conversationId": room,
+        "conversationName": "测群",
+        "createTime": at,
+    }
+
+
+def test_incremental_refresh_shares_one_kline(tmp_path: Path) -> None:
     store = CaStore(tmp_path / "ca.db")
-    now = int(__import__("time").time())
-    start = local_day_start(now)
     address = "0x" + "cd" * 20
+    t0 = 1_800_000_000
     store.remember(
-        {
-            "id": "d1",
-            "senderUsername": "wxid_z",
-            "senderName": "测",
-            "conversationId": "11111111111@chatroom",
-            "conversationName": "测群",
-            "createTime": start + 3600,
-        },
-        [{"address": address, "chain": "bsc", "marketCap": 1000}],
+        _call_card("d1", "wxid_a", t0), [{"address": address, "chain": "bsc", "marketCap": 1000}]
     )
-    evening = start + 22 * 3600 + 120
-    due = store.next_daily(now=evening)
-    assert due is not None
-    assert due["address"] == address
+    # 新币：第一次只按首喊时间拉，没有水位线。
+    assert store.plan_anchors("bsc", address) == [t0]
+    # 刚喊不到 60 秒不首结算；60 秒后进入首结算队列。
+    assert store.next_due(now=t0 + 10) is None
+    assert store.next_due(now=t0 + SETTLE_DELAY)["address"] == address
+    first = t0 + 600
+    assert store.apply_quote(
+        "bsc",
+        address,
+        {
+            "marketCap": 1200,
+            "klineBars": [[t0, 1000], [t0 + 300, 3000]],
+            "klineOk": True,
+            "klineTo": first,
+        },
+        now=first,
+        anchors=[t0],
+    )
+    row = store._conn.execute("SELECT kline_until FROM ca_tokens").fetchone()
+    assert row["kline_until"] == first - WATERMARK_OVERLAP
+    assert store._conn.execute("SELECT settled FROM ca_calls").fetchone()[0] == 1
+    # 已结算后只从水位线续拉一段，所有喊单共用。
+    assert store.plan_anchors("bsc", address) == [first - WATERMARK_OVERLAP]
+    # 第二个人在水位线之后喊：只为他补自己的锚点。
+    t1 = first + 900
+    store.remember(
+        _call_card("d2", "wxid_b", t1), [{"address": address, "chain": "bsc", "marketCap": 2000}]
+    )
+    assert store.plan_anchors("bsc", address) == [first - WATERMARK_OVERLAP, t1]
+    # 增量柱：t1 之前的 2500 只算给 A，t1 之后的 5000 两人都算。
+    second = t1 + 600
     store.apply_quote(
         "bsc",
         address,
-        {"marketCap": 1100, "klineBars": [[start + 3600, 1100]]},
-        now=evening,
-        settle=True,
+        {
+            "marketCap": 2400,
+            "klineBars": [[first - 60, 2500], [t1, 2100], [t1 + 120, 5000]],
+            "klineOk": True,
+            "klineTo": second,
+        },
+        now=second,
+        anchors=store.plan_anchors("bsc", address),
     )
-    assert store.next_daily(now=evening) is None
-    assert in_daily_window(evening, 22)
-    morning = start + 10 * 3600
-    assert not in_daily_window(morning, 22)
+    aths = dict(store._conn.execute("SELECT caller_id, ath_mcap FROM ca_calls").fetchall())
+    assert aths == {"wxid_a": 5000, "wxid_b": 5000}
+    # 只增不减：空列表、更低的柱都不会把高点改小。
+    assert not store.apply_quote(
+        "bsc",
+        address,
+        {"marketCap": 2400, "klineBars": [], "klineOk": True, "klineTo": second + 120},
+        now=second + 120,
+    )
+    store.apply_quote(
+        "bsc",
+        address,
+        {"marketCap": 2400, "klineBars": [[second, 100]], "klineOk": True, "klineTo": second + 240},
+        now=second + 240,
+    )
+    aths = dict(store._conn.execute("SELECT caller_id, ath_mcap FROM ca_calls").fetchall())
+    assert aths == {"wxid_a": 5000, "wxid_b": 5000}
+    # 拉取失败：不推进水位线、不标结算。
+    before = store._conn.execute("SELECT kline_until FROM ca_tokens").fetchone()[0]
+    store.remember(
+        _call_card("d3", "wxid_c", second + 300),
+        [{"address": address, "chain": "bsc", "marketCap": 2400}],
+    )
+    store.apply_quote(
+        "bsc",
+        address,
+        {"marketCap": 2400, "klineBars": [], "klineOk": False},
+        now=second + 400,
+        anchors=[second + 300],
+    )
+    assert store._conn.execute("SELECT kline_until FROM ca_tokens").fetchone()[0] == before
+    assert (
+        store._conn.execute("SELECT settled FROM ca_calls WHERE caller_id = 'wxid_c'").fetchone()[0]
+        == 0
+    )
+
+
+def test_late_recorded_call_still_gets_own_segment(tmp_path: Path) -> None:
+    # 卡片晚到（回灌历史）：喊单时间早于水位线，也必须按它自己的时间补段，不能当已结算。
+    store = CaStore(tmp_path / "ca.db")
+    address = "0x" + "ef" * 20
+    t0 = 1_800_000_000
+    store.remember(
+        _call_card("e1", "wxid_a", t0), [{"address": address, "chain": "bsc", "marketCap": 1000}]
+    )
+    mark_to = t0 + 7200
+    store.apply_quote(
+        "bsc",
+        address,
+        {"marketCap": 1000, "klineBars": [], "klineOk": True, "klineTo": mark_to},
+        now=mark_to,
+        anchors=[t0],
+    )
+    late = t0 + 1800
+    store.remember(
+        _call_card("e2", "wxid_b", late), [{"address": address, "chain": "bsc", "marketCap": 1500}]
+    )
+    assert store.plan_anchors("bsc", address) == [late, mark_to - WATERMARK_OVERLAP]
+
+
+def test_next_due_tiers_and_dormant(tmp_path: Path) -> None:
+    store = CaStore(tmp_path / "ca.db")
+    now = 1_800_100_000
+    hot = "0x" + "11" * 20
+    dead = "0x" + "22" * 20
+    alive = "0x" + "33" * 20
+    for card, addr, at, mcap in (
+        ("h", hot, now - 3600, 50_000),
+        ("d", dead, now - DORMANT_AGE - 3600, 9_000),
+        ("a", alive, now - DORMANT_AGE - 3600, 80_000),
+    ):
+        store.remember(
+            _call_card(card, f"wxid_{card}", at),
+            [{"address": addr, "chain": "bsc", "marketCap": mcap}],
+        )
+    store._conn.execute("UPDATE ca_calls SET settled = 1")
+    store._conn.execute("UPDATE ca_group_firsts SET settled = 1")
+    store._conn.execute("UPDATE ca_tokens SET refreshed_at = ?", (now - 1,))
+    store._conn.commit()
+    assert store.next_due(now=now) is None
+    # 热币 2 分钟一刷。
+    assert store.next_due(now=now + REFRESH_HOT)["address"] == hot
+    store._conn.execute("UPDATE ca_tokens SET refreshed_at = 0")
+    store._conn.commit()
+    due = []
+    while (row := store.next_due(now=now)) is not None:
+        due.append(row["address"])
+        store.mark_attempt(row["chain"], row["address"], now=now)
+    # 24 小时没人喊且不到 1.5 万的休眠币不刷。
+    assert dead not in due
+    assert set(due) == {hot, alive}
+    assert store.stats(now=now)["dormant"] == 1
+    # 再被喊到就恢复。
+    store.remember(
+        _call_card("d2", "wxid_x", now), [{"address": dead, "chain": "bsc", "marketCap": 9_500}]
+    )
+    assert store.next_due(now=now + SETTLE_DELAY)["address"] == dead
+
+
+def test_board_pending_cap_and_range(tmp_path: Path) -> None:
+    store = CaStore(tmp_path / "ca.db")
+    now = 1_800_000_000 + 40 * 86400
+    rows = [
+        # (用户, 币, 喊单时间, 喊单市值, 喊后最高)
+        ("wxid_a", "0x" + "a1" * 20, now - 35 * 86400, 1000, 100_000),  # 100x，均倍按 20x 封顶
+        ("wxid_a", "0x" + "a2" * 20, now - 2 * 86400, 1000, 1000),  # 已满 24h 未到 → 负
+        ("wxid_a", "0x" + "a3" * 20, now - 3600, 1000, 1100),  # 不满 24h 未到 → 待定
+        ("wxid_a", "0x" + "a4" * 20, now - 1800, 1000, 2000),  # 不满 24h 已到 → 胜
+    ]
+    for index, (user, addr, at, mcap, peak) in enumerate(rows):
+        store.remember(
+            _call_card(f"p{index}", user, at),
+            [{"address": addr, "chain": "bsc", "marketCap": mcap}],
+        )
+        store._conn.execute("UPDATE ca_calls SET ath_mcap = ? WHERE address = ?", (peak, addr))
+    store._conn.commit()
+    user = store.board(now=now)[0]
+    assert user["calls"] == 4
+    assert user["pending"] == 1
+    assert user["settled"] == 3
+    assert user["wins"] == 2
+    assert user["maxX"] == 100
+    assert round(user["avgX"], 4) == round((20 + 1 + 2) / 3, 4)
+    recent = store.board("7d", now=now)[0]
+    assert recent["calls"] == 3
+    assert recent["maxX"] == 2
+    assert call_status(1.2, now - 100, now) == "pending"
+    assert call_status(1.2, now - PENDING_AGE, now) == "lose"
+    assert call_status(1.5, now - 100, now) == "win"
+    only_pending = CaStore(tmp_path / "p.db")
+    only_pending.remember(
+        _call_card("q", "wxid_q", now - 60),
+        [{"address": "0x" + "b1" * 20, "chain": "bsc", "marketCap": 1000}],
+    )
+    solo = only_pending.board(now=now)[0]
+    assert solo["winRateText"] == "待定"
+    assert solo["score"] == 0
+
+
+def test_rate_window_reserve_and_sync() -> None:
+    from wechat_feed.tokens import RateWindow
+
+    async def run() -> None:
+        window = RateWindow(5, window=0.3)
+        # 后台要给实时留 2：窗口里已有 1 时，权重 3 的后台请求得等。
+        await window.acquire(1)
+        task = asyncio.create_task(window.acquire(3, reserve=2))
+        await asyncio.sleep(0.05)
+        assert not task.done()
+        # 实时请求不受后台排队影响。
+        await asyncio.wait_for(window.acquire(1), timeout=0.05)
+        await asyncio.wait_for(task, timeout=1.0)
+        # 服务端说只剩 0：本地补记到满额。
+        fresh = RateWindow(5, window=0.3)
+        fresh.sync(0)
+        later = asyncio.create_task(fresh.acquire(1))
+        await asyncio.sleep(0.05)
+        assert not later.done()
+        await asyncio.wait_for(later, timeout=1.0)
+
+    asyncio.run(run())
 
 
 def test_card_store_round_trip(tmp_path: Path) -> None:
@@ -1443,7 +1640,9 @@ def test_package_omits_local_data_and_api_key() -> None:
     assert "ca-pill score" in app_js
     assert "peak_since" in (ROOT / "src" / "wechat_feed" / "tokens.py").read_text(encoding="utf-8")
     assert "klineBars" in (ROOT / "src" / "wechat_feed" / "castore.py").read_text(encoding="utf-8")
-    assert "next_daily" in (ROOT / "src" / "wechat_feed" / "castore.py").read_text(encoding="utf-8")
+    assert "plan_anchors" in (ROOT / "src" / "wechat_feed" / "castore.py").read_text(
+        encoding="utf-8"
+    )
     assert "since=since" in (ROOT / "src" / "wechat_feed" / "tokens.py").read_text(encoding="utf-8")
     assert "_KLINE_SPAN" in (ROOT / "src" / "wechat_feed" / "tokens.py").read_text(encoding="utf-8")
     castore_py = (ROOT / "src" / "wechat_feed" / "castore.py").read_text(encoding="utf-8")
@@ -1466,7 +1665,7 @@ def test_package_omits_local_data_and_api_key() -> None:
     assert "wf-xbar" in feed
     assert "wf-discover" in feed
     assert "foundById" in (ROOT / "src" / "wechat_feed" / "castore.py").read_text(encoding="utf-8")
-    assert "next_stale" in (ROOT / "src" / "wechat_feed" / "castore.py").read_text(encoding="utf-8")
+    assert "next_due" in (ROOT / "src" / "wechat_feed" / "castore.py").read_text(encoding="utf-8")
     assert "ca-strip" in (ROOT / "web" / "index.html").read_text(encoding="utf-8")
     assert "data-open-board" in (ROOT / "web" / "index.html").read_text(encoding="utf-8")
     assert "ca-page" in (ROOT / "web" / "index.html").read_text(encoding="utf-8")
@@ -1576,3 +1775,25 @@ def test_ca_store_heals_lowercased_solana_rows(tmp_path: Path) -> None:
         assert rows == [sol], table
     by_id = {row["userId"]: row for row in store.board()}
     assert by_id["wxid_h"]["calls"] == 1
+
+
+def test_background_budget_leaves_room_for_realtime() -> None:
+    # 后台 K 线（权重 3、留 2）每个窗口最多 1 条；同一窗口里实时请求仍能立刻拿到 2。
+    import time
+
+    from wechat_feed.tokens import RateWindow
+
+    async def run() -> tuple[float, float]:
+        window = RateWindow(5, window=0.2)
+        start = time.monotonic()
+        for _ in range(4):
+            await window.acquire(3, reserve=2)
+        bg_elapsed = time.monotonic() - start
+        realtime = time.monotonic()
+        await window.acquire(1)
+        await window.acquire(1)
+        return bg_elapsed, time.monotonic() - realtime
+
+    bg_elapsed, realtime_wait = asyncio.run(run())
+    assert bg_elapsed >= 0.55  # 4 条至少跨 3 个完整窗口
+    assert realtime_wait < 0.05

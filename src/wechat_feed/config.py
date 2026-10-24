@@ -49,7 +49,6 @@ def default_settings() -> dict[str, Any]:
         "gmgn_api_key": "",
         "mcap_format": "cn",
         "ca_board": True,
-        "ca_daily_hour": 22,
     }
 
 
@@ -234,14 +233,8 @@ def normalize_settings(raw: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(raw["ca_board"], bool):
             raise ValueError("CA 发现榜开关必须是布尔值")
         merged["ca_board"] = raw["ca_board"]
-    if "ca_daily_hour" in raw:
-        try:
-            hour = int(raw["ca_daily_hour"])
-        except (TypeError, ValueError) as exc:
-            raise ValueError("日结算时刻必须是 0-23 的整数") from exc
-        if hour < 0 or hour > 23:
-            raise ValueError("日结算时刻必须是 0-23 的整数")
-        merged["ca_daily_hour"] = hour
+    # 旧版的日结算时刻：增量刷新后不再需要，读到就丢掉。
+    merged.pop("ca_daily_hour", None)
     if "blocked_groups" in raw:
         merged["blocked_groups"] = _clean_id_list(raw["blocked_groups"], limit=200, label="屏蔽群")
     if "blocked_users" in raw:

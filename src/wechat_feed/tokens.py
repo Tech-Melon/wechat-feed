@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import os
 import re
 import time
@@ -863,8 +864,19 @@ def _plan_weight() -> int:
         return 5
 
 
+# 限频预算（免费档每秒权重 5）：
+# - 本地按 1.2 秒滑动窗口记账：请求在路上的延迟抖动会让服务端看到的间隔变短，留 20% 余量防 429。
+#   总吞吐上限约 5 / 1.2 ≈ 4.2 权重/秒。
+# - 后台刷榜每个窗口必须给实时留 2：K 线权重 3，后台最多每窗口 1 条 ≈ 2.5 权重/秒，
+#   实时的 search(1)+info(1) 永远随到随走。
+_RATE_WINDOW = 1.2
+_REALTIME_RESERVE = 2
+# 当前协程是否在后台刷榜：只影响限频优先级和 429 处理。
+_BACKGROUND: contextvars.ContextVar[bool] = contextvars.ContextVar("gmgn_bg", default=False)
+
+
 class RateWindow:
-    """1 秒滑动窗口内已用权重不超过上限。"""
+    """1 秒滑动窗口内已用权重不超过上限；用响应头的剩余额度校准本地估算。"""
 
     def __init__(self, limit: int, window: float = 1.0) -> None:
         self.limit = limit
@@ -872,21 +884,46 @@ class RateWindow:
         self._used: deque[tuple[float, int]] = deque()
         self._lock = asyncio.Lock()
 
-    async def acquire(self, weight: int) -> None:
+    def _expire(self, now: float) -> int:
+        while self._used and now - self._used[0][0] >= self.window:
+            self._used.popleft()
+        return sum(item[1] for item in self._used)
+
+    async def acquire(self, weight: int, reserve: int = 0) -> None:
+        """reserve：本次必须给别人留出的权重。等待在锁外进行，后台排队不挡实时。"""
         weight = min(weight, self.limit)
-        async with self._lock:
-            while True:
+        reserve = max(0, min(reserve, self.limit - weight))
+        while True:
+            async with self._lock:
                 now = time.monotonic()
-                while self._used and now - self._used[0][0] >= self.window:
-                    self._used.popleft()
-                if sum(item[1] for item in self._used) + weight <= self.limit:
+                used = self._expire(now)
+                if used + weight + reserve <= self.limit:
                     self._used.append((now, weight))
                     return
-                await asyncio.sleep(self.window - (now - self._used[0][0]) + 0.01)
+                wait = self.window - (now - self._used[0][0]) + 0.01 if self._used else 0.05
+            await asyncio.sleep(max(0.02, wait))
+
+    def sync(self, remaining: int | None) -> None:
+        """服务端说本秒只剩 remaining，本地记账少了就补齐，避免撞 429。"""
+        if remaining is None:
+            return
+        now = time.monotonic()
+        used = self._expire(now)
+        server_used = self.limit - max(0, int(remaining))
+        if server_used > used:
+            self._used.append((now, server_used - used))
 
     def penalize(self, seconds: float) -> None:
         """被 429 后把窗口占满一段时间。"""
         self._used.append((time.monotonic() + seconds - self.window, self.limit))
+
+
+def _remaining(response: httpx.Response) -> int | None:
+    raw = response.headers.get("x-ratelimit-remaining")
+    try:
+        return int(raw) if raw is not None else None
+    except ValueError:
+        return None
 
 
 class TokenIndex:
@@ -894,12 +931,15 @@ class TokenIndex:
         self._key_provider = key_provider or (lambda: "")
         self._cache: dict[str, tuple[float, dict[str, Any] | None]] = {}
         self._lock = asyncio.Lock()
-        self._rate = RateWindow(_plan_weight())
+        self._rate = RateWindow(_plan_weight(), window=_RATE_WINDOW)
+        # 鉴权失败时全部停；限频只停后台，实时退避 1 秒重试。
         self._gmgn_cooldown = 0.0
+        self._bg_cooldown = 0.0
         self._live = 0
 
     def idle(self) -> bool:
-        return self._live <= 0 and time.time() >= self._gmgn_cooldown
+        now = time.time()
+        return self._live <= 0 and now >= max(self._gmgn_cooldown, self._bg_cooldown)
 
     def has_key(self) -> bool:
         return bool(str(self._key_provider() or "").strip())
@@ -973,7 +1013,8 @@ class TokenIndex:
         address = str(address or "").strip()
         if not address:
             return None
-        self._live += 1
+        # 后台任务：不计入 _live（那是实时解析的计数），限频时给实时让路。
+        flag = _BACKGROUND.set(True)
         try:
             chain_norm = _norm_chain(chain)
             if chain_norm and last_price > 0 and last_mcap > 0:
@@ -993,7 +1034,7 @@ class TokenIndex:
                 token = await self._fill_ath(token, force=True, since=since, anchors=anchors)
             return token
         finally:
-            self._live = max(0, self._live - 1)
+            _BACKGROUND.reset(flag)
 
     async def resolve_one(
         self,
@@ -1022,12 +1063,21 @@ class TokenIndex:
         api_key = str(self._key_provider() or "").strip()
         if not api_key:
             return None
+        background = _BACKGROUND.get()
         if time.time() < self._gmgn_cooldown:
             return None
         last_status = 0
         weight = _GMGN_WEIGHTS.get(path, 1)
-        for _attempt in range(2):
-            await self._rate.acquire(weight)
+        for attempt in range(2):
+            if background:
+                # 实时解析在跑就先让开；后台被 429 过的冷却期内不再打。
+                while self._live > 0:
+                    await asyncio.sleep(0.2)
+                if time.time() < self._bg_cooldown:
+                    return None
+                await self._rate.acquire(weight, reserve=_REALTIME_RESERVE)
+            else:
+                await self._rate.acquire(weight)
             params = {
                 "timestamp": str(int(time.time())),
                 "client_id": str(uuid.uuid4()),
@@ -1040,10 +1090,24 @@ class TokenIndex:
                     headers=_gmgn_headers(api_key),
                 )
                 last_status = response.status_code
+                self._rate.sync(_remaining(response))
                 if response.status_code in {429, 408}:
-                    self._rate.penalize(8.0)
-                    self._gmgn_cooldown = max(self._gmgn_cooldown, time.time() + 8)
-                    logger.info("GMGN 限频 {} status={}", path, response.status_code)
+                    logger.info(
+                        "GMGN 限频 {} status={} {}",
+                        path,
+                        response.status_code,
+                        "后台" if background else "实时",
+                    )
+                    if background:
+                        # 后台停 8 秒，实时不受影响。
+                        self._rate.penalize(2.0)
+                        self._bg_cooldown = time.time() + 8
+                        return None
+                    # 实时：退避 1 秒重试一次，不让整条链路停摆。
+                    self._rate.penalize(1.0)
+                    if attempt == 0:
+                        await asyncio.sleep(1.0)
+                        continue
                     return None
                 if response.status_code in {401, 403}:
                     self._gmgn_cooldown = time.time() + 90
@@ -1170,8 +1234,11 @@ class TokenIndex:
         now: int,
         current_mcap: float,
         current_price: float,
-    ) -> tuple[list[tuple[int, float]], float]:
-        """按喊单锚点分段拉 K 线，合并成一份喊单后可用的柱，顺带给出最新收盘价。"""
+    ) -> tuple[list[tuple[int, float]], float, bool]:
+        """按锚点分段拉 K 线，合并成一份柱，顺带给出最新收盘价。
+
+        第三项表示每段都拿到了响应（空列表也算拿到，说明这段时间没成交）。
+        """
         groups: list[list[tuple[int, float]]] = []
         last_close = 0.0
         last_end = 0
@@ -1180,13 +1247,13 @@ class TokenIndex:
                 chain, address, resolution, lo, hi, current_mcap, current_price
             )
             if payload is None:
-                # 任一段失败（限频/鉴权）就整份作废，免得用残缺的柱覆盖已有高点。
-                return [], 0.0
+                # 任一段失败（限频/鉴权）就整份作废：不推进水位线，下次重拉。
+                return [], 0.0, False
             groups.append(bars)
             if close > 0 and hi >= last_end:
                 last_close = close
                 last_end = hi
-        return merge_bars(*groups), last_close
+        return merge_bars(*groups), last_close, True
 
     async def _fill_ath(
         self,
@@ -1213,11 +1280,13 @@ class TokenIndex:
         if points:
             # 喊单后的高点：分段细粒度，粗柱不跨喊单时间。
             start = min(points)
-            bars, last_close = await self._since_bars(
+            bars, last_close, ok = await self._since_bars(
                 chain, address, points, now, current_mcap, current_price
             )
             token["klineBars"] = bars
-            token["klineInterval"] = 0
+            # klineOk/klineTo 给增量刷新推进水位线用。
+            token["klineOk"] = ok
+            token["klineTo"] = now
         else:
             # 新币首次解析只要历史 ATH 展示，一次请求即可。
             start = created if created > 0 else now - 180 * 86400

@@ -38,6 +38,7 @@ const state = {
   userSort: "latest",
   userRange: "all",
   userWin: "all",
+  boardRange: "all",
 };
 
 function emptyFeedCache() {
@@ -635,13 +636,16 @@ function rangeStart(range, nowSec) {
   return 0;
 }
 
+function callStatus(item) {
+  return item.status || (item.win ? "win" : "lose");
+}
+
 function filterUserCalls(calls, { range, win, nowSec } = {}) {
   const start = rangeStart(range || "all", nowSec);
   return (calls || []).filter((item) => {
     const at = Number(item.calledAt) || 0;
     if (start && at < start) return false;
-    if (win === "win" && !item.win) return false;
-    if (win === "lose" && item.win) return false;
+    if (win && win !== "all" && callStatus(item) !== win) return false;
     return true;
   });
 }
@@ -675,7 +679,9 @@ async function loadBoard() {
     return;
   }
   try {
-    const payload = await readJson(await fetch("/api/ca-board"));
+    const payload = await readJson(
+      await fetch(`/api/ca-board?range=${encodeURIComponent(state.boardRange || "all")}`),
+    );
     state.board = payload.board || [];
     state.boardStats = payload.stats || {};
   } catch (error) {
@@ -765,11 +771,12 @@ function personRow(row, starred) {
         <span>${row.calls} 次喊单</span>
       </div>
       <div class="ca-stats">
-        <span class="ca-pill score" title="威尔逊下限 × 次数 × 平均倍数"><span class="ca-k">得分</span><b>${esc(row.scoreText || "0")}</b></span>
+        <span class="ca-pill score" title="威尔逊下限 × 次数 × 平均倍数（待定单不计）"><span class="ca-k">得分</span><b>${esc(row.scoreText || "0")}</b></span>
         <span class="ca-pill win"><span class="ca-k">胜率</span><b>${esc(row.winRateText)}</b></span>
-        <span class="ca-pill"><span class="ca-k">均倍</span><b>${esc(row.avgXText || "—")}</b></span>
+        <span class="ca-pill" title="单条最高倍按 20x 封顶后平均"><span class="ca-k">均倍</span><b>${esc(row.avgXText || "—")}</b></span>
         <span class="ca-pill max"><span class="ca-k">最高</span><b>${esc(row.maxXText || "—")}</b></span>
-        <span class="ca-pill"><span class="ca-k">胜场</span><b>${row.wins}/${row.calls}</b></span>
+        <span class="ca-pill"><span class="ca-k">胜场</span><b>${row.wins}/${row.settled ?? row.calls}</b></span>
+        ${row.pending ? `<span class="ca-pill" title="喊单不满 24 小时、还没到 1.5 倍，暂不计入胜率"><span class="ca-k">待定</span><b>${row.pending}</b></span>` : ""}
       </div>
     </div>
     <button type="button" class="ca-star${on ? " on" : ""}" data-board-star="${esc(row.userId)}">${on ? "已星标" : "星标"}</button>
@@ -827,6 +834,7 @@ function renderUserPage(userId) {
     <div class="ca-seg" role="tablist" aria-label="胜负">
       <button type="button" data-user-win="all" class="${winOn("all")}">全部</button>
       <button type="button" data-user-win="win" class="${winOn("win")}">已胜</button>
+      <button type="button" data-user-win="pending" class="${winOn("pending")}">待定</button>
       <button type="button" data-user-win="lose" class="${winOn("lose")}">未到 50%</button>
     </div>
   </div>
@@ -843,9 +851,12 @@ function renderUserPage(userId) {
   }
   box.innerHTML = head + calls.map((item) => {
     const symbol = item.symbol ? `$${esc(item.symbol)}` : esc(item.address.slice(0, 8));
-    const win = item.win
-      ? `<span class="ca-pill win" title="ATH ≥ 该用户首次喊单市值的 1.5 倍（涨幅 50%）"><span class="ca-k">结果</span><b>胜</b></span>`
-      : `<span class="ca-pill" title="ATH 未到该用户首次喊单市值的 1.5 倍"><span class="ca-k">结果</span><b>未到 50%</b></span>`;
+    const status = callStatus(item);
+    const win = status === "win"
+      ? `<span class="ca-pill win" title="喊单后最高 ≥ 该用户首次喊单市值的 1.5 倍（涨幅 50%）"><span class="ca-k">结果</span><b>胜</b></span>`
+      : status === "pending"
+        ? `<span class="ca-pill" title="喊单不满 24 小时、还没到 1.5 倍，暂不计入胜率"><span class="ca-k">结果</span><b>待定</b></span>`
+        : `<span class="ca-pill" title="喊单 24 小时后仍未到首次喊单市值的 1.5 倍"><span class="ca-k">结果</span><b>未到 50%</b></span>`;
     const first = item.isFirst ? `<span class="wf-debut">所有群首发</span>` : "";
     const when = window.WechatFeed.formatDateTime
       ? window.WechatFeed.formatDateTime(item.calledAt)
@@ -876,16 +887,31 @@ function renderBoardPage() {
   const stats = state.boardStats || {};
   const starred = new Set(state.settings.starred_users || []);
   title.textContent = "CA 发现榜";
-  const hour = Number(stats.dailyHour);
-  const clock = Number.isFinite(hour) ? `${hour}:00` : "22:00";
+  const esc = window.WechatFeed.escapeText;
+  const rule = `<span class="ca-win-rule" title="相对该用户自己第一次喊到这个 CA 时的市值；喊单不满 24 小时且还没到的记为待定">胜：喊单后最高 ≥ 1.5 倍（涨幅 50%）</span>`;
+  const dormant = stats.dormant
+    ? ` · <span title="超过 24 小时没人再喊、现市值不到 ${esc(moneyText(stats.dormantMcap || 15000))} 的暂停刷新，再被喊到自动恢复">${stats.dormant} 个休眠</span>`
+    : "";
   sub.innerHTML = stats.tokens
-    ? `${stats.users || rows.length} 人 · ${stats.tokens} 个 CA · <span class="ca-win-rule" title="相对该用户自己第一次喊到这个 CA 时的市值">胜：ATH ≥ 1.5 倍（涨幅 50%）</span> · ${clock} 后空闲结算当日 CA`
-    : `按喊单次数、胜率和平均倍数综合打分 · <span class="ca-win-rule">胜：ATH ≥ 1.5 倍（涨幅 50%）</span>`;
+    ? `${stats.users || rows.length} 人 · ${stats.tokens} 个 CA · ${rule}${dormant}`
+    : `按喊单次数、胜率和平均倍数综合打分 · ${rule}`;
+  const rangeOn = (key) => ((state.boardRange || "all") === key ? " on" : "");
+  const toolbar = `<div class="ca-toolbar">
+    <div class="ca-seg" role="tablist" aria-label="统计范围">
+      <button type="button" data-board-range="all" class="${rangeOn("all")}">全部</button>
+      <button type="button" data-board-range="30d" class="${rangeOn("30d")}">近 30 天</button>
+      <button type="button" data-board-range="7d" class="${rangeOn("7d")}">近 7 天</button>
+    </div>
+  </div>`;
   if (!rows.length) {
-    box.innerHTML = `<p class="ca-empty">还没有 CA 发现记录。群里出现合约并查出市值后会记在这里。</p>`;
+    box.innerHTML = `${toolbar}<p class="ca-empty">${
+      (state.boardRange || "all") === "all"
+        ? "还没有 CA 发现记录。群里出现合约并查出市值后会记在这里。"
+        : "这个时间范围内还没有喊单。"
+    }</p>`;
     return;
   }
-  box.innerHTML = rows.map((row) => personRow(row, starred)).join("");
+  box.innerHTML = toolbar + rows.map((row) => personRow(row, starred)).join("");
   bindBrokenAvatars(box);
 }
 
@@ -1581,6 +1607,14 @@ document.addEventListener("click", (event) => {
     event.stopPropagation();
     state.userRange = rangeBtn.dataset.userRange || "all";
     if (boardRoute().view === "user") renderUserPage(boardRoute().userId);
+    return;
+  }
+  const boardRangeBtn = event.target.closest("[data-board-range]");
+  if (boardRangeBtn) {
+    event.preventDefault();
+    event.stopPropagation();
+    state.boardRange = boardRangeBtn.dataset.boardRange || "all";
+    loadBoard().catch((error) => setNotice(error.message));
     return;
   }
   const winBtn = event.target.closest("[data-user-win]");

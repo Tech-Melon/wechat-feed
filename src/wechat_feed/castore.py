@@ -15,43 +15,30 @@ KEEP_SECONDS = 365 * 24 * 3600
 WIN_X = 1.5
 # 超过一万倍当脏数据：历史回灌、错市值、单位错位都会出这种数。
 MAX_X = 10_000.0
+# 刷新分层按「最后一次被喊」算：热 6 小时内、温 3 天内、其余为冷。
 HOT_AGE = 6 * 3600
 WARM_AGE = 3 * 86400
-REFRESH_HOT = 15 * 60
-REFRESH_WARM = 2 * 3600
-REFRESH_COLD = 12 * 3600
-DAILY_HOUR = 22
-DAILY_RETRY = 10 * 60
-
-
-def local_day_start(now: int | None = None) -> int:
-    stamp = int(now or time.time())
-    local = time.localtime(stamp)
-    return int(
-        time.mktime(
-            (
-                local.tm_year,
-                local.tm_mon,
-                local.tm_mday,
-                0,
-                0,
-                0,
-                0,
-                0,
-                -1,
-            )
-        )
-    )
-
-
-def local_day_id(now: int | None = None) -> int:
-    local = time.localtime(int(now or time.time()))
-    return local.tm_year * 10000 + local.tm_mon * 100 + local.tm_mday
-
-
-def in_daily_window(now: int | None = None, hour: int = DAILY_HOUR) -> bool:
-    hour = min(23, max(0, int(hour)))
-    return time.localtime(int(now or time.time())).tm_hour >= hour
+# 这是「最短」间隔：额度够时按它刷，到期的币多了就由限频窗口自然排队、间隔拉长。
+# 稳态约 1.6 权重/秒（免费档 5 的三成），后台上限 2.5 权重/秒，见 tokens 的限频说明。
+REFRESH_HOT = 30
+REFRESH_WARM = 5 * 60
+REFRESH_COLD = 60 * 60
+# 新喊单 60 秒后首结算（那根 1m 才有数），失败 60 秒后重试；超过 6 小时回落到普通分层。
+SETTLE_DELAY = 60
+SETTLE_RETRY = 60
+SETTLE_WINDOW = 6 * 3600
+# 超过 24 小时没人再喊、且现市值低于 1.5 万的币暂停拉 K 线，下次被喊到再恢复。
+DORMANT_AGE = 24 * 3600
+DORMANT_MCAP = 15_000.0
+# 水位线往回留 2 分钟重叠，兜住 GMGN 迟到入库的柱；重叠部分取 max，不会重复计数。
+WATERMARK_OVERLAP = 120
+# 一次刷新最多带几个未结算喊单（另加水位线锚点），剩下的下一轮再结算。
+SETTLE_BATCH = 3
+# 喊单不满 24 小时且还没到 1.5 倍的记为待定，不进胜率分母。
+PENDING_AGE = 24 * 3600
+# 均倍按单条 20 倍封顶，避免一个百倍单主导得分；最高倍仍显示真实值。
+AVG_CAP = 20.0
+BOARD_RANGES = {"all": KEEP_SECONDS, "30d": 30 * 86400, "7d": 7 * 86400}
 
 
 def _num(value: Any) -> float:
@@ -111,6 +98,15 @@ def _multiple(peak: float, base: float) -> float:
     if value > 500:
         return 500.0
     return value
+
+
+def call_status(multiple: float, called_at: int, now: int) -> str:
+    """win：已到 1.5 倍；pending：不满 24 小时且还没到；lose：满 24 小时仍没到。"""
+    if multiple >= WIN_X:
+        return "win"
+    if called_at and now - int(called_at) < PENDING_AGE:
+        return "pending"
+    return "lose"
 
 
 class CaStore:
@@ -199,13 +195,34 @@ class CaStore:
             self._conn.execute(
                 "ALTER TABLE ca_group_firsts ADD COLUMN ath_mcap REAL NOT NULL DEFAULT 0"
             )
-        if "settled_day" not in cols:
-            self._conn.execute(
-                "ALTER TABLE ca_tokens ADD COLUMN settled_day INTEGER NOT NULL DEFAULT 0"
-            )
         if "last_price" not in cols:
             self._conn.execute(
                 "ALTER TABLE ca_tokens ADD COLUMN last_price REAL NOT NULL DEFAULT 0"
+            )
+        if "kline_until" not in cols:
+            # 增量刷新的水位线。旧库按上次全量刷新时间迁移：那次已按喊单后口径算过。
+            self._conn.execute(
+                "ALTER TABLE ca_tokens ADD COLUMN kline_until INTEGER NOT NULL DEFAULT 0"
+            )
+            self._conn.execute(
+                "UPDATE ca_tokens SET kline_until = refreshed_at - ? WHERE refreshed_at > 0",
+                (WATERMARK_OVERLAP,),
+            )
+        for table, at in (("ca_calls", "called_at"), ("ca_group_firsts", "first_at")):
+            have = {row[1] for row in self._conn.execute(f"PRAGMA table_info({table})")}
+            if "settled" in have:
+                continue
+            # 每条喊单只做一次首结算；旧库里刷新时已存在的喊单视为已结算。
+            self._conn.execute(f"ALTER TABLE {table} ADD COLUMN settled INTEGER NOT NULL DEFAULT 0")
+            self._conn.execute(
+                f"""
+                UPDATE {table} SET settled = 1
+                WHERE EXISTS (
+                    SELECT 1 FROM ca_tokens t
+                    WHERE t.chain = {table}.chain AND t.address = {table}.address
+                      AND t.refreshed_at > 0 AND {table}.{at} <= t.refreshed_at
+                )
+                """
             )
 
     def _backfill_group_firsts(self) -> None:
@@ -713,7 +730,8 @@ class CaStore:
             ]
         return card
 
-    def _rank_rows(self, rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
+    def _rank_rows(self, rows: list[sqlite3.Row], now: int | None = None) -> list[dict[str, Any]]:
+        stamp = int(now or time.time())
         buckets: dict[str, dict[str, Any]] = {}
         for row in rows:
             ident = _text(row["caller_id"])
@@ -735,23 +753,33 @@ class CaStore:
                     "name": _text(row["caller_name"]) or ident,
                     "calls": 0,
                     "wins": 0,
+                    "pending": 0,
                     "xs": [],
+                    "max": 0.0,
                 },
             )
             if _text(row["caller_name"]):
                 item["name"] = _text(row["caller_name"])
             item["calls"] += 1
-            if multiple >= WIN_X:
+            item["max"] = max(item["max"], multiple)
+            status = call_status(multiple, int(row["called_at"] or 0), stamp)
+            if status == "pending":
+                # 还没走完 24 小时的单不进分母，也不拉低均倍。
+                item["pending"] += 1
+                continue
+            if status == "win":
                 item["wins"] += 1
             if multiple > 0:
-                item["xs"].append(multiple)
+                item["xs"].append(min(multiple, AVG_CAP))
         ranked: list[dict[str, Any]] = []
         for item in buckets.values():
-            n = int(item["calls"])
+            calls = int(item["calls"])
+            pending = int(item["pending"])
+            n = calls - pending
             wins = int(item["wins"])
             xs = item["xs"]
             avg_x = sum(xs) / len(xs) if xs else 0.0
-            max_x = max(xs) if xs else 0.0
+            max_x = float(item["max"])
             rate = wins / n if n else 0.0
             wilson = wilson_lower(wins, n)
             score = wilson * math.log10(1 + n) * (1 + math.log1p(avg_x))
@@ -759,7 +787,9 @@ class CaStore:
                 {
                     "userId": item["userId"],
                     "name": item["name"],
-                    "calls": n,
+                    "calls": calls,
+                    "settled": n,
+                    "pending": pending,
                     "wins": wins,
                     "winRate": rate,
                     "avgX": avg_x,
@@ -767,7 +797,7 @@ class CaStore:
                     "score": score,
                     "avgXText": format_x(avg_x),
                     "maxXText": format_x(max_x),
-                    "winRateText": f"{rate * 100:.0f}%",
+                    "winRateText": f"{rate * 100:.0f}%" if n else "待定",
                     "scoreText": f"{score:.2f}",
                 }
             )
@@ -778,7 +808,7 @@ class CaStore:
 
     def _call_join_sql(self) -> str:
         return """
-            SELECT c.caller_id, c.caller_name, c.mcap,
+            SELECT c.caller_id, c.caller_name, c.mcap, c.called_at,
                    COALESCE(NULLIF(c.ath_mcap, 0), t.last_mcap) AS call_ath,
                    t.last_mcap, t.first_mcap
             FROM ca_calls c
@@ -786,11 +816,13 @@ class CaStore:
             WHERE c.called_at >= ?
         """
 
-    def board(self) -> list[dict[str, Any]]:
-        cut = self.cutoff()
+    def board(self, window: str = "all", now: int | None = None) -> list[dict[str, Any]]:
+        """window：all / 30d / 7d，按喊单时间截取。"""
+        stamp = int(now or time.time())
+        span = BOARD_RANGES.get(window, KEEP_SECONDS)
         with self._lock:
-            rows = self._conn.execute(self._call_join_sql(), (cut,)).fetchall()
-        return self._rank_rows(rows)
+            rows = self._conn.execute(self._call_join_sql(), (stamp - span,)).fetchall()
+        return self._rank_rows(rows, stamp)
 
     def user_stats(self, user_id: str) -> dict[str, Any] | None:
         ident = _text(user_id)
@@ -824,6 +856,7 @@ class CaStore:
                 """,
                 (ident, cut),
             ).fetchall()
+        stamp = int(time.time())
         out: list[dict[str, Any]] = []
         for row in rows:
             first = _num(row["first_mcap"])
@@ -854,6 +887,7 @@ class CaStore:
                     "nowXText": format_x(now_x),
                     "maxXText": format_x(max_x),
                     "win": max_x >= WIN_X,
+                    "status": call_status(max_x, int(row["called_at"] or 0), stamp),
                     "isFirst": _text(row["discoverer_id"]) == ident,
                     "groupId": _text(row["group_id"]),
                     "groupName": _text(row["group_name"]),
@@ -891,60 +925,110 @@ class CaStore:
             user["winRateText"] = f"{user['winRate'] * 100:.0f}%"
         return {"user": user, "calls": calls}
 
-    def next_stale(self, now: int | None = None) -> dict[str, Any] | None:
-        """按热度分层取下一条该刷的代币：新的 15 分钟，温的 2 小时，冷的 12 小时。"""
+    def _unsettled_sql(self, extra_calls: str = "", extra_groups: str = "") -> str:
+        return f"""(
+            EXISTS (
+                SELECT 1 FROM ca_calls c
+                WHERE c.chain = t.chain AND c.address = t.address AND c.settled = 0 {extra_calls}
+            )
+            OR EXISTS (
+                SELECT 1 FROM ca_group_firsts g
+                WHERE g.chain = t.chain AND g.address = t.address AND g.settled = 0 {extra_groups}
+            )
+        )"""
+
+    def _dormant_sql(self) -> str:
+        return "(t.last_at < ? AND t.last_mcap < ?)"
+
+    def next_due(self, now: int | None = None) -> dict[str, Any] | None:
+        """下一条该刷的代币。
+
+        1. 6 小时内的新喊单还没首结算的，喊单 60 秒后优先；
+        2. 其余按最后被喊时间分层：热 2 分钟、温 30 分钟、冷 6 小时；
+        3. 超过 24 小时没人喊、现市值不到 1.5 万的休眠，直到再被喊到。
+        """
         stamp = int(now or time.time())
-        bands = (
-            (stamp - HOT_AGE, stamp + 1, stamp - REFRESH_HOT),
-            (stamp - WARM_AGE, stamp - HOT_AGE, stamp - REFRESH_WARM),
-            (0, stamp - WARM_AGE, stamp - REFRESH_COLD),
+        cols = "t.chain, t.address, t.first_at, t.last_at, t.last_mcap, t.last_price"
+        base = "t.first_mcap > 0 AND IFNULL(t.address, '') != ''"
+        fresh = self._unsettled_sql(
+            "AND c.called_at <= ? AND c.called_at >= ?",
+            "AND g.first_at <= ? AND g.first_at >= ?",
         )
+        window = (stamp - SETTLE_DELAY, stamp - SETTLE_WINDOW)
         with self._lock:
+            row = self._conn.execute(
+                f"""
+                SELECT {cols} FROM ca_tokens t
+                WHERE {base} AND t.refreshed_at <= ? AND {fresh}
+                ORDER BY t.last_at DESC LIMIT 1
+                """,
+                (stamp - SETTLE_RETRY, *window, *window),
+            ).fetchone()
+            if row is not None:
+                return dict(row)
+            bands = (
+                (stamp - HOT_AGE, stamp + 1, stamp - REFRESH_HOT),
+                (stamp - WARM_AGE, stamp - HOT_AGE, stamp - REFRESH_WARM),
+                (0, stamp - WARM_AGE, stamp - REFRESH_COLD),
+            )
             for min_last, max_last, max_refreshed in bands:
                 row = self._conn.execute(
-                    """
-                    SELECT chain, address, last_at, refreshed_at, ath_mcap, first_mcap,
-                           first_at, last_mcap, last_price
-                    FROM ca_tokens
-                    WHERE first_mcap > 0
-                      AND IFNULL(address, '') != ''
-                      AND last_at >= ? AND last_at < ?
-                      AND refreshed_at < ?
-                    ORDER BY last_at DESC
-                    LIMIT 1
+                    f"""
+                    SELECT {cols} FROM ca_tokens t
+                    WHERE {base}
+                      AND t.last_at >= ? AND t.last_at < ?
+                      AND t.refreshed_at < ?
+                      AND NOT {self._dormant_sql()}
+                    ORDER BY t.refreshed_at ASC LIMIT 1
                     """,
-                    (min_last, max_last, max_refreshed),
+                    (min_last, max_last, max_refreshed, stamp - DORMANT_AGE, DORMANT_MCAP),
                 ).fetchone()
                 if row is not None:
                     return dict(row)
         return None
 
-    def next_daily(self, now: int | None = None) -> dict[str, Any] | None:
-        """当天喊过、尚未做日结算的代币，一次一条。"""
-        stamp = int(now or time.time())
-        start = local_day_start(stamp)
-        day_id = local_day_id(stamp)
+    def plan_anchors(self, chain: str, address: str) -> list[int]:
+        """这次刷新要拉的锚点：水位线 + 至多 3 条未结算喊单的时间。
+
+        水位线之后的柱对所有已结算的喊单都是「喊单之后」，一份数据大家共用；
+        只有未结算的喊单需要在自己的喊单时间附近补细粒度段。
+        """
+        chain = _text(chain).lower() or "_"
+        address = _addr(address)
         with self._lock:
             row = self._conn.execute(
-                """
-                SELECT t.chain, t.address, t.last_at, t.refreshed_at,
-                       t.ath_mcap, t.first_mcap, t.first_at, t.last_mcap, t.last_price
-                FROM ca_tokens t
-                WHERE t.first_mcap > 0
-                  AND IFNULL(t.address, '') != ''
-                  AND IFNULL(t.settled_day, 0) < ?
-                  AND t.refreshed_at < ?
-                  AND EXISTS (
-                    SELECT 1 FROM ca_calls c
-                    WHERE c.chain = t.chain AND c.address = t.address
-                      AND c.called_at >= ?
-                  )
-                ORDER BY t.last_at DESC
-                LIMIT 1
-                """,
-                (day_id, stamp - DAILY_RETRY, start),
+                "SELECT first_at, kline_until FROM ca_tokens WHERE chain = ? AND address = ?",
+                (chain, address),
             ).fetchone()
-        return dict(row) if row is not None else None
+            if row is None:
+                return []
+            pending = [
+                int(r["t"])
+                for r in self._conn.execute(
+                    """
+                    SELECT called_at AS t FROM ca_calls
+                    WHERE chain = ? AND address = ? AND settled = 0 AND called_at > 0
+                    UNION
+                    SELECT first_at AS t FROM ca_group_firsts
+                    WHERE chain = ? AND address = ? AND settled = 0 AND first_at > 0
+                    ORDER BY t ASC
+                    """,
+                    (chain, address, chain, address),
+                ).fetchall()
+            ]
+        mark = int(row["kline_until"] or 0)
+        head = mark if mark > 0 else int(row["first_at"] or 0)
+        points = {p for p in [head, *pending[:SETTLE_BATCH]] if p > 0}
+        return sorted(points)
+
+    def mark_attempt(self, chain: str, address: str, now: int | None = None) -> None:
+        """拉取失败也记一次尝试时间，避免同一个币被立刻反复重试。"""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE ca_tokens SET refreshed_at = ? WHERE chain = ? AND address = ?",
+                (int(now or time.time()), _text(chain).lower() or "_", _addr(address)),
+            )
+            self._conn.commit()
 
     def apply_quote(
         self,
@@ -952,27 +1036,33 @@ class CaStore:
         address: str,
         quote: dict[str, Any] | None,
         now: int | None = None,
-        settle: bool = False,
-    ) -> None:
+        anchors: list[int] | None = None,
+    ) -> bool:
+        """写回一次刷新结果。高点只增不减；K 线完整拉到时推进水位线、标记本批喊单已结算。
+
+        返回榜单数据是否有变化，没变就不必推送刷新。
+        """
         stamp = int(now or time.time())
         chain = _text(chain).lower() or "_"
         address = _addr(address)
         if not address:
-            return
+            return False
         with self._lock:
             row = self._conn.execute(
                 """
-                SELECT first_mcap, ath_mcap, last_mcap, first_at
+                SELECT first_mcap, ath_mcap, last_mcap, first_at, kline_until
                 FROM ca_tokens WHERE chain = ? AND address = ?
                 """,
                 (chain, address),
             ).fetchone()
             if row is None:
-                return
+                return False
             first = _num(row["first_mcap"])
             ath = _num(row["ath_mcap"])
             last = _num(row["last_mcap"])
+            before = (first, ath, last)
             first_at = int(row["first_at"] or 0)
+            mark = int(row["kline_until"] or 0)
             symbol = ""
             name = ""
             bars = _quote_bars(quote)
@@ -988,12 +1078,26 @@ class CaStore:
                         first = mcap
                 if last > 0 and (first <= 0 or last / first <= MAX_X):
                     ath = max(ath, last)
+            changed = False
             if bars:
                 since_ath = peak_since(bars, first_at)
                 if since_ath > 0 and (first <= 0 or since_ath / first <= MAX_X):
-                    ath = max(since_ath, last)
-                self._apply_since_ath(chain, address, bars, last)
-            settled = local_day_id(stamp) if settle else None
+                    ath = max(ath, since_ath)
+                changed = self._apply_since_ath(chain, address, bars)
+            if quote and quote.get("klineOk"):
+                fetched_to = int(quote.get("klineTo") or stamp)
+                mark = max(mark, fetched_to - WATERMARK_OVERLAP)
+                points = sorted({int(a) for a in (anchors or []) if int(a or 0) > 0})
+                if points:
+                    marks = ",".join("?" * len(points))
+                    for table, at in (("ca_calls", "called_at"), ("ca_group_firsts", "first_at")):
+                        self._conn.execute(
+                            f"""
+                            UPDATE {table} SET settled = 1
+                            WHERE chain = ? AND address = ? AND {at} IN ({marks})
+                            """,
+                            (chain, address, *points),
+                        )
             self._conn.execute(
                 """
                 UPDATE ca_tokens SET
@@ -1003,59 +1107,59 @@ class CaStore:
                     ath_mcap = ?,
                     last_mcap = ?,
                     refreshed_at = ?,
-                    settled_day = COALESCE(?, settled_day),
+                    kline_until = ?,
                     last_price = CASE WHEN ? > 0 THEN ? ELSE last_price END
                 WHERE chain = ? AND address = ?
                 """,
-                (symbol, name, first, ath, last, stamp, settled, price, price, chain, address),
+                (symbol, name, first, ath, last, stamp, mark, price, price, chain, address),
             )
             self._conn.commit()
+        return changed or (first, ath, last) != before
 
     def _apply_since_ath(
         self,
         chain: str,
         address: str,
         bars: list[tuple[int, float]],
-        last: float,
-    ) -> None:
-        """一份全局 K 线，按各用户/各群的喊单时间切片算 ATH，不再为每个群打接口。"""
+    ) -> bool:
+        """一份共用 K 线，按各用户/各群的喊单时间切片；高点只增不减。"""
+        changed = False
         for call in self._conn.execute(
             "SELECT caller_id, called_at, mcap FROM ca_calls WHERE chain = ? AND address = ?",
             (chain, address),
         ).fetchall():
             peak = peak_since(bars, int(call["called_at"] or 0))
-            if peak <= 0:
-                peak = last
             call_mcap = _num(call["mcap"])
-            if call_mcap > 0 and peak / call_mcap > MAX_X:
+            if peak <= 0 or (call_mcap > 0 and peak / call_mcap > MAX_X):
                 continue
-            self._conn.execute(
+            cur = self._conn.execute(
                 """
                 UPDATE ca_calls SET ath_mcap = ?
-                WHERE chain = ? AND address = ? AND caller_id = ?
+                WHERE chain = ? AND address = ? AND caller_id = ? AND ath_mcap < ?
                 """,
-                (peak, chain, address, call["caller_id"]),
+                (peak, chain, address, call["caller_id"], peak),
             )
+            changed = changed or cur.rowcount > 0
         for group in self._conn.execute(
             "SELECT group_id, first_at, mcap FROM ca_group_firsts WHERE chain = ? AND address = ?",
             (chain, address),
         ).fetchall():
             peak = peak_since(bars, int(group["first_at"] or 0))
-            if peak <= 0:
-                peak = last
             base = _num(group["mcap"])
-            if base > 0 and peak / base > MAX_X:
+            if peak <= 0 or (base > 0 and peak / base > MAX_X):
                 continue
-            self._conn.execute(
+            cur = self._conn.execute(
                 """
                 UPDATE ca_group_firsts SET ath_mcap = ?
-                WHERE chain = ? AND address = ? AND group_id = ?
+                WHERE chain = ? AND address = ? AND group_id = ? AND ath_mcap < ?
                 """,
-                (peak, chain, address, group["group_id"]),
+                (peak, chain, address, group["group_id"], peak),
             )
+            changed = changed or cur.rowcount > 0
+        return changed
 
     def anchors(self, chain: str, address: str) -> list[int]:
-        """该币所有喊单时间与各群首喊时间，K 线按它们分段拉。"""
+        """该币所有喊单时间与各群首喊时间。"""
         chain = _text(chain).lower() or "_"
         address = _addr(address)
         with self._lock:
@@ -1071,69 +1175,34 @@ class CaStore:
             ).fetchall()
         return sorted({int(row["t"] or 0) for row in rows if int(row["t"] or 0) > 0})
 
-    def stats(self) -> dict[str, Any]:
-        stamp = int(time.time())
+    def _count(self, sql: str, params: tuple[Any, ...] = ()) -> int:
+        return int(self._conn.execute(sql, params).fetchone()[0] or 0)
+
+    def stats(self, now: int | None = None) -> dict[str, Any]:
+        stamp = int(now or time.time())
+        live = "SELECT COUNT(*) FROM ca_tokens t WHERE t.first_mcap > 0"
         with self._lock:
-            tokens = int(
-                self._conn.execute(
-                    "SELECT COUNT(*) FROM ca_tokens WHERE first_mcap > 0"
-                ).fetchone()[0]
+            tokens = self._count(live)
+            calls = self._count("SELECT COUNT(*) FROM ca_calls")
+            users = self._count(
+                """
+                SELECT COUNT(DISTINCT caller_id) FROM ca_calls
+                WHERE IFNULL(caller_id, '') != ''
+                """
             )
-            calls = int(self._conn.execute("SELECT COUNT(*) FROM ca_calls").fetchone()[0])
-            users = int(
-                self._conn.execute(
-                    "SELECT COUNT(DISTINCT caller_id) FROM ca_calls "
-                    "WHERE IFNULL(caller_id,'') != ''"
-                ).fetchone()[0]
-            )
-            last_refresh = int(
-                self._conn.execute(
-                    "SELECT COALESCE(MAX(refreshed_at), 0) FROM ca_tokens"
-                ).fetchone()[0]
-            )
-            stale = 0
-            bands = (
-                (stamp - HOT_AGE, stamp + 1, stamp - REFRESH_HOT),
-                (stamp - WARM_AGE, stamp - HOT_AGE, stamp - REFRESH_WARM),
-                (0, stamp - WARM_AGE, stamp - REFRESH_COLD),
-            )
-            for min_last, max_last, max_refreshed in bands:
-                stale += int(
-                    self._conn.execute(
-                        """
-                        SELECT COUNT(*) FROM ca_tokens
-                        WHERE first_mcap > 0 AND IFNULL(address,'') != ''
-                          AND last_at >= ? AND last_at < ?
-                          AND refreshed_at < ?
-                        """,
-                        (min_last, max_last, max_refreshed),
-                    ).fetchone()[0]
-                )
-            start = local_day_start(stamp)
-            day_id = local_day_id(stamp)
-            daily_due = int(
-                self._conn.execute(
-                    """
-                    SELECT COUNT(*) FROM ca_tokens t
-                    WHERE t.first_mcap > 0 AND IFNULL(t.address, '') != ''
-                      AND IFNULL(t.settled_day, 0) < ?
-                      AND EXISTS (
-                        SELECT 1 FROM ca_calls c
-                        WHERE c.chain = t.chain AND c.address = t.address
-                          AND c.called_at >= ?
-                      )
-                    """,
-                    (day_id, start),
-                ).fetchone()[0]
+            last_refresh = self._count("SELECT COALESCE(MAX(refreshed_at), 0) FROM ca_tokens")
+            settling = self._count(f"{live} AND {self._unsettled_sql()}")
+            dormant = self._count(
+                f"{live} AND {self._dormant_sql()}", (stamp - DORMANT_AGE, DORMANT_MCAP)
             )
         return {
             "tokens": tokens,
             "calls": calls,
             "users": users,
-            "stale": stale,
             "lastRefresh": last_refresh,
-            "dailyDue": daily_due,
-            "dailyHour": DAILY_HOUR,
+            "settling": settling,
+            "dormant": dormant,
+            "dormantMcap": DORMANT_MCAP,
         }
 
 

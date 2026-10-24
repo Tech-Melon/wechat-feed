@@ -19,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
 from . import http as feed_http
-from .castore import CaStore, in_daily_window, local_day_id
+from .castore import BOARD_RANGES, CaStore
 from .config import (
     SettingsStore,
     data_dir,
@@ -54,10 +54,10 @@ _AVATAR_CACHE = "private, max-age=86400"
 _LISTEN_HOST = "127.0.0.1"
 _LISTEN_PORT = 8765
 _PAGE_SIZE = 30
-_IDLE_GAP = 2.0
-_DAILY_GAP = 2.5
+# 节奏交给限频窗口控制，这里只留很短的喘息；没有到期的币时 3 秒看一次。
+_IDLE_GAP = 0.2
+_IDLE_POLL = 3
 _USER_ID = re.compile(r"^[A-Za-z0-9_@.\-]{1,80}$")
-_DAILY_LOG_DAY = 0
 
 
 async def _idle_ca_refresh(
@@ -67,8 +67,7 @@ async def _idle_ca_refresh(
     store: SettingsStore,
     hub: Hub,
 ) -> None:
-    """空闲时刷榜。每天设定时刻后优先结算当日喊过的 CA，间隔拉长以免顶满限频。"""
-    global _DAILY_LOG_DAY
+    """后台刷榜：先首结算新喊单，再按热度增量刷新。实时解析优先，后台只用剩余额度。"""
     try:
         await asyncio.wait_for(stop.wait(), timeout=15)
         return
@@ -80,42 +79,33 @@ async def _idle_ca_refresh(
             if not settings.get("ca_board", True):
                 await asyncio.wait_for(stop.wait(), timeout=20)
                 continue
-            if not tokens.has_key() or not tokens.idle():
-                await asyncio.wait_for(stop.wait(), timeout=8)
-                continue
-            now = int(time.time())
-            hour = int(settings.get("ca_daily_hour") or 22)
-            settle = in_daily_window(now, hour)
-            row = cas.next_daily(now) if settle else None
-            if row is not None:
-                day_id = local_day_id(now)
-                if _DAILY_LOG_DAY != day_id:
-                    logger.info("开始结算当日 CA（{} 点后空闲排队）", hour)
-                    _DAILY_LOG_DAY = day_id
-                gap = _DAILY_GAP
-            else:
-                row = cas.next_stale(now)
-                settle = False
-                gap = _IDLE_GAP
-            if row is None:
+            if not tokens.has_key():
                 await asyncio.wait_for(stop.wait(), timeout=20)
                 continue
+            if not tokens.idle():
+                # 实时解析在跑或后台被 429 冷却中：短等再看，不再一停 8 秒。
+                await asyncio.wait_for(stop.wait(), timeout=1)
+                continue
+            row = cas.next_due(int(time.time()))
+            if row is None:
+                await asyncio.wait_for(stop.wait(), timeout=_IDLE_POLL)
+                continue
+            chain = str(row.get("chain") or "")
+            address = str(row.get("address") or "")
+            anchors = cas.plan_anchors(chain, address)
+            # 只按锚点拉：水位线之后共用一份，未结算喊单补自己的细粒度段。
             quote = await tokens.quote(
-                str(row.get("address") or ""),
-                str(row.get("chain") or ""),
-                since=int(row.get("first_at") or 0),
+                address,
+                chain,
                 last_mcap=float(row.get("last_mcap") or 0),
                 last_price=float(row.get("last_price") or 0),
-                anchors=cas.anchors(str(row.get("chain") or ""), str(row.get("address") or "")),
+                anchors=anchors,
             )
-            cas.apply_quote(
-                str(row.get("chain") or ""),
-                str(row.get("address") or ""),
-                quote,
-                settle=settle,
-            )
-            hub.notify_board()
-            await asyncio.sleep(gap)
+            if quote is None:
+                cas.mark_attempt(chain, address)
+            elif cas.apply_quote(chain, address, quote, anchors=anchors):
+                hub.notify_board()
+            await asyncio.sleep(_IDLE_GAP)
         except TimeoutError:
             continue
         except asyncio.CancelledError:
@@ -192,9 +182,7 @@ def create_app() -> FastAPI:
             tasks.append(asyncio.create_task(backfill_history(store, hub, stop, direct)))
             tasks.append(asyncio.create_task(supervise(store, hub, stop, token_index, direct)))
         if os.environ.get("WECHAT_FEED_DISABLE_TOKEN") != "1":
-            tasks.append(
-                asyncio.create_task(_idle_ca_refresh(stop, cas, token_index, store, hub))
-            )
+            tasks.append(asyncio.create_task(_idle_ca_refresh(stop, cas, token_index, store, hub)))
         yield
         stop.set()
         for task in tasks:
@@ -456,11 +444,7 @@ def create_app() -> FastAPI:
             )
         blob, media_type, kind = found
         # 高清位要的是 _h / 原图。若微信还没下，这里只能拿出缩略图，不能当高清缓存一周。
-        cache = (
-            "no-store"
-            if hd and kind == "t"
-            else "private, max-age=604800, immutable"
-        )
+        cache = "no-store" if hd and kind == "t" else "private, max-age=604800, immutable"
         return Response(
             content=blob,
             media_type=media_type,
@@ -538,9 +522,7 @@ def create_app() -> FastAPI:
         if source is None:
             raise HTTPException(status_code=404, detail="没有这个表情")
         url, filename = source
-        return await _cached_image(
-            url, data_dir() / "emotes" / filename, 80_000, allowed_emote_url
-        )
+        return await _cached_image(url, data_dir() / "emotes" / filename, 80_000, allowed_emote_url)
 
     @app.get("/api/chainicon")
     async def chain_icon(n: str = "") -> Response:
@@ -629,13 +611,18 @@ def create_app() -> FastAPI:
         return {"ok": True, "card": card}
 
     @app.get("/api/ca-board")
-    def ca_board() -> dict[str, Any]:
+    def ca_board(range: str = "all") -> dict[str, Any]:  # noqa: A002 - 查询参数名
         enabled = bool(store.get().get("ca_board", True))
         if not enabled:
             return {"ok": True, "enabled": False, "board": [], "stats": {}}
-        stats = cas.stats()
-        stats["dailyHour"] = int(store.get().get("ca_daily_hour") or 22)
-        return {"ok": True, "enabled": True, "board": cas.board(), "stats": stats}
+        window = range if range in BOARD_RANGES else "all"
+        return {
+            "ok": True,
+            "enabled": True,
+            "range": window,
+            "board": cas.board(window),
+            "stats": cas.stats(),
+        }
 
     @app.get("/api/ca-board/user/{user_id}")
     def ca_board_user(user_id: str) -> dict[str, Any]:
