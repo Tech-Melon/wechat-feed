@@ -198,7 +198,7 @@ function renderRecent(d) {
   const body = d.recent.map((e) => `<tr>
     <td class="l">${clock(e.at)}</td>
     <td class="l">${esc(NAMES[e.path] || e.path)}</td>
-    <td><span class="tag ${e.kind === "background" ? "bg" : "rt"}">${e.kind === "background" ? "后台" : "实时"}</span></td>
+    <td><span class="tag ${e.kind === "realtime" ? "rt" : "bg"}">${e.kind === "manual" ? "手动刷新" : e.kind === "background" ? "后台" : "实时"}</span></td>
     <td><span class="tag ${esc(e.outcome)}">${esc(OUTCOME_TEXT[e.outcome] || e.outcome)}</span></td>
     <td>${e.status || "—"}</td>
     <td>${e.weight}</td>

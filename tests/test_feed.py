@@ -2011,3 +2011,98 @@ def test_user_refresh_targets_and_api(tmp_path: Path, client: TestClient) -> Non
     assert client.post(url, json={"scope": "pending"}).status_code == 400
     assert client.post(url, content="{}", headers={"Content-Type": "text/plain"}).status_code == 415
     assert client.get("/api/ca-board/refresh").json()["running"] is False
+
+
+def test_quote_fills_price_from_search_when_no_trades() -> None:
+    # 死盘：水位线之后一根 K 线都没有，现价要用 search 补，不能停在旧市值。
+    from wechat_feed.tokens import TokenIndex
+
+    index = TokenIndex(lambda: "gmgn_test")
+    calls: list[str] = []
+
+    async def no_bars(chain, address, resolution, lo, hi, mcap, price):
+        calls.append(resolution)
+        return [], 0.0, {"list": []}
+
+    async def search(address, hint=""):
+        calls.append("search")
+        return [{"chain": "robinhood", "address": address, "price": "0.0000052315729"}], []
+
+    index._kline_fetch = no_bars
+    index._search_hits = search
+    quote = asyncio.run(
+        index.quote(
+            "0x034fe8b7f1355360b9d44badcf0978aab1c2888e",
+            "robinhood",
+            last_mcap=28_646.4,
+            last_price=2.86464e-05,
+            anchors=[int(__import__("time").time()) - 7200],
+        )
+    )
+    assert quote["klineOk"] is True
+    assert "search" in calls
+    assert round(quote["marketCap"]) == 5232
+
+
+def test_pending_window_is_six_hours() -> None:
+    now = 1_800_000_000
+    assert call_status(1.2, now - 5 * 3600, now) == "pending"
+    assert call_status(1.2, now - 6 * 3600, now) == "lose"
+    assert PENDING_AGE == 6 * 3600
+
+
+def test_manual_refresh_pauses_background_gmgn() -> None:
+    import time
+
+    from wechat_feed import tokens as tk
+
+    index = tk.TokenIndex(lambda: "gmgn_test")
+    order: list[str] = []
+
+    class Resp:
+        status_code = 200
+        headers: dict[str, str] = {}
+
+        def json(self):
+            return {"code": 0, "data": {"list": []}}
+
+    class Client:
+        async def get(self, url, params=None, headers=None):
+            order.append(tk._MANUAL.get() and "manual" or "background")
+            return Resp()
+
+    index._client = lambda: Client()
+
+    async def call(manual: bool) -> None:
+        bg = tk._BACKGROUND.set(True)
+        mf = tk._MANUAL.set(manual)
+        try:
+            await index._gmgn_call("/v1/market/search", {"q": "x"})
+        finally:
+            tk._MANUAL.reset(mf)
+            tk._BACKGROUND.reset(bg)
+
+    async def run() -> None:
+        index.manual_begin()
+        background = asyncio.create_task(call(False))
+        await asyncio.sleep(0.3)
+        # 手动刷新在跑：定时刷新的请求被挡住，手动的照常发。
+        assert order == []
+        await call(True)
+        assert order == ["manual"]
+        index.manual_end()
+        await asyncio.wait_for(background, timeout=2)
+        assert order == ["manual", "background"]
+        # 超过 10 分钟上限后自动恢复。
+        index._manual_until = time.time() - 1
+        assert not index.manual_active()
+
+    asyncio.run(run())
+
+
+def test_manual_timeout_scales_with_tokens() -> None:
+    from wechat_feed.tokens import MANUAL_MAX, MANUAL_MIN, manual_timeout
+
+    assert manual_timeout(1) == MANUAL_MIN
+    assert manual_timeout(81) == 60 + 81 * 6
+    assert manual_timeout(10_000) == MANUAL_MAX

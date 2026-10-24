@@ -83,7 +83,7 @@ class GmgnStore:
             key = (
                 int(e.at // 60) * 60,
                 e.path,
-                "background" if e.background else "realtime",
+                _kind(e),
                 e.outcome,
             )
             row = rollup.setdefault(key, [0, 0, 0.0, 0.0, 0.0])
@@ -105,7 +105,7 @@ class GmgnStore:
                         e.at,
                         e.path,
                         e.weight,
-                        "background" if e.background else "realtime",
+                        _kind(e),
                         e.outcome,
                         e.status,
                         e.latency_ms,
@@ -156,7 +156,8 @@ class GmgnStore:
                 at=float(r["at"]),
                 path=str(r["path"]),
                 weight=int(r["weight"]),
-                background=r["kind"] == "background",
+                background=r["kind"] != "realtime",
+                manual=r["kind"] == "manual",
                 outcome=str(r["outcome"]),
                 status=int(r["status"] or 0),
                 latency_ms=float(r["latency_ms"] or 0),
@@ -179,7 +180,7 @@ class GmgnStore:
                 SELECT (minute - ?) / ? AS slot,
                        SUM(CASE WHEN outcome != 'skipped' THEN calls ELSE 0 END) AS calls,
                        SUM(weight) AS weight,
-                       SUM(CASE WHEN kind = 'background' THEN weight ELSE 0 END) AS bg_weight,
+                       SUM(CASE WHEN kind != 'realtime' THEN weight ELSE 0 END) AS bg_weight,
                        SUM(CASE WHEN outcome = 'limited' THEN calls ELSE 0 END) AS limited,
                        SUM(CASE WHEN outcome IN ({failed}) THEN calls ELSE 0 END) AS failed
                 FROM gmgn_minute WHERE minute >= ? AND minute < ?
@@ -359,6 +360,10 @@ class GmgnStore:
     def close(self) -> None:
         with self._lock:
             self._conn.close()
+
+
+def _kind(e: Event) -> str:
+    return "manual" if e.manual else ("background" if e.background else "realtime")
 
 
 def file_bytes(path: Path) -> int:

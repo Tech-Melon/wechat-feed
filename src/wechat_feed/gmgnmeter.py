@@ -37,6 +37,8 @@ class Event:
     remaining: int | None
     # 后台为实时解析让路的时间，和限速等待分开记。
     yield_ms: float = 0.0
+    # 用户点的立即刷新（也算后台额度，单独标出来）。
+    manual: bool = False
 
 
 def _pct(values: list[float], q: float) -> float:
@@ -107,6 +109,7 @@ class GmgnMeter:
         latency_ms: float = 0.0,
         wait_ms: float = 0.0,
         yield_ms: float = 0.0,
+        manual: bool = False,
         remaining: int | None = None,
         at: float | None = None,
     ) -> None:
@@ -123,6 +126,7 @@ class GmgnMeter:
             wait_ms=float(wait_ms),
             remaining=remaining,
             yield_ms=float(yield_ms),
+            manual=bool(manual),
         )
         with self._lock:
             self._events.append(event)
@@ -249,7 +253,7 @@ class GmgnMeter:
                 "at": round(e.at, 3),
                 "path": e.path,
                 "weight": e.weight,
-                "kind": "background" if e.background else "realtime",
+                "kind": "manual" if e.manual else ("background" if e.background else "realtime"),
                 "outcome": e.outcome,
                 "status": e.status,
                 "latencyMs": round(e.latency_ms, 1),

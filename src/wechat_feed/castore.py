@@ -19,11 +19,12 @@ MAX_X = 10_000.0
 # 刷新分层按「最后一次被喊」算：热 6 小时内、温 3 天内、其余为冷。
 HOT_AGE = 6 * 3600
 WARM_AGE = 3 * 86400
-# 这是「最短」间隔：额度够时按它刷，到期的币多了就由限频窗口自然排队、间隔拉长。
-# 稳态约 1.6 权重/秒（免费档 5 的三成），后台上限 2.5 权重/秒，见 tokens 的限频说明。
-REFRESH_HOT = 30
-REFRESH_WARM = 5 * 60
-REFRESH_COLD = 60 * 60
+# 刷完一次就冻结这么久再回到待刷队列。K 线是历史数据，间隔拉长不会漏掉高点：
+# 下次从水位线续拉时，冻结期间的最高价照样算进来，只是榜单上的数字晚一点更新。
+# 新喊单不受冻结影响，60 秒后照常首结算；要马上看结果可以在详情页手动刷新。
+REFRESH_HOT = 15 * 60
+REFRESH_WARM = 60 * 60
+REFRESH_COLD = 6 * 3600
 # 新喊单 60 秒后首结算（那根 1m 才有数），失败 60 秒后重试；超过 6 小时回落到普通分层。
 SETTLE_DELAY = 60
 SETTLE_RETRY = 60
@@ -35,8 +36,9 @@ DORMANT_MCAP = 15_000.0
 WATERMARK_OVERLAP = 120
 # 一次刷新最多带几个未结算喊单（另加水位线锚点），剩下的下一轮再结算。
 SETTLE_BATCH = 3
-# 喊单不满 24 小时且还没到 1.5 倍的记为待定，不进胜率分母。
-PENDING_AGE = 24 * 3600
+# 喊单不满 6 小时且还没到 1.5 倍的记为待定，不进胜率分母。
+# meme 的主要行情大多在喊单后几小时内走完，6 小时后还没到就算未到。
+PENDING_AGE = 6 * 3600
 # 均倍按单条 20 倍封顶，避免一个百倍单主导得分；最高倍仍显示真实值。
 AVG_CAP = 20.0
 BOARD_RANGES = {"all": KEEP_SECONDS, "30d": 30 * 86400, "7d": 7 * 86400}
@@ -106,7 +108,7 @@ def _multiple(peak: float, base: float) -> float:
 
 
 def call_status(multiple: float, called_at: int, now: int) -> str:
-    """win：已到 1.5 倍；pending：不满 24 小时且还没到；lose：满 24 小时仍没到。"""
+    """win：已到 1.5 倍；pending：不满 6 小时且还没到；lose：满 6 小时仍没到。"""
     if multiple >= WIN_X:
         return "win"
     if called_at and now - int(called_at) < PENDING_AGE:
@@ -783,7 +785,7 @@ class CaStore:
             item["max"] = max(item["max"], multiple)
             status = call_status(multiple, int(row["called_at"] or 0), stamp)
             if status == "pending":
-                # 还没走完 24 小时的单不进分母，也不拉低均倍。
+                # 还没走完待定期的单不进分母，也不拉低均倍。
                 item["pending"] += 1
                 continue
             if status == "win":
@@ -920,7 +922,7 @@ class CaStore:
     ) -> list[dict[str, Any]]:
         """某个用户要立即刷新的币（同一个币只刷一次，新喊的在前）。
 
-        scope=pending：只刷待定（不满 24 小时且还没到 1.5 倍）；
+        scope=pending：只刷待定（不满 6 小时且还没到 1.5 倍）；
         scope=range：刷 window（today / 7d / 30d / all）内喊过的全部。
         """
         stamp = int(now or time.time())
@@ -1017,7 +1019,7 @@ class CaStore:
         """下一条该刷的代币。
 
         1. 6 小时内的新喊单还没首结算的，喊单 60 秒后优先；
-        2. 其余按最后被喊时间分层：热 2 分钟、温 30 分钟、冷 6 小时；
+        2. 其余刷完后冻结：最后被喊 6 小时内冻结 15 分钟，3 天内 1 小时，更早 6 小时；
         3. 超过 24 小时没人喊、现市值不到 1.5 万的休眠，直到再被喊到。
         """
         stamp = int(now or time.time())
@@ -1378,6 +1380,7 @@ class CaStore:
             "settling": settling,
             "dormant": dormant,
             "dormantMcap": DORMANT_MCAP,
+            "pendingHours": PENDING_AGE // 3600,
         }
 
 

@@ -33,7 +33,7 @@ from .gmgnstore import HISTORY_RANGES, GmgnStore
 from .hub import Hub
 from .normalize import normalize_message_event
 from .store import CardStore
-from .tokens import TokenIndex, allowed_chainicon_url, chain_favicon
+from .tokens import TokenIndex, allowed_chainicon_url, chain_favicon, manual_timeout
 from .upstream import apply_display, backfill_history, fetch_upstream_groups, supervise
 from .wxemoji import (
     STICKER_MAX,
@@ -129,18 +129,31 @@ class RefreshJob:
     async def _run(
         self, targets: list[dict[str, Any]], cas: CaStore, tokens: TokenIndex, hub: Hub
     ) -> None:
+        # 手动刷新期间定时刷新的 GMGN 请求全部暂停；超时按币数算，到点就停，后台自动恢复。
+        limit = manual_timeout(len(targets))
+        self.state["timeoutSec"] = limit
+        tokens.manual_begin(limit)
+        deadline = time.time() + limit
         try:
             for row in targets:
+                if time.time() >= deadline:
+                    self.state["timedOut"] = True
+                    break
                 chain = row["chain"]
                 address = row["address"]
                 anchors = cas.plan_anchors(chain, address)
                 try:
-                    quote = await tokens.quote(
-                        address,
-                        chain,
-                        last_mcap=float(row.get("last_mcap") or 0),
-                        last_price=float(row.get("last_price") or 0),
-                        anchors=anchors,
+                    # 单个币最多等 60 秒，网络卡住也不会把整个任务挂死。
+                    quote = await asyncio.wait_for(
+                        tokens.quote(
+                            address,
+                            chain,
+                            last_mcap=float(row.get("last_mcap") or 0),
+                            last_price=float(row.get("last_price") or 0),
+                            anchors=anchors,
+                            manual=True,
+                        ),
+                        timeout=max(1.0, min(60.0, deadline - time.time())),
                     )
                 except Exception as exc:
                     logger.info("手动刷新 CA 失败: {}", type(exc).__name__)
@@ -153,6 +166,7 @@ class RefreshJob:
                     hub.notify_board()
                 self.state["done"] += 1
         finally:
+            tokens.manual_end()
             self.state["running"] = False
             self.state["finishedAt"] = time.time()
             hub.notify_board()

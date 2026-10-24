@@ -892,11 +892,15 @@ function personRow(row, starred) {
         <span class="ca-pill" title="单条最高倍按 20x 封顶后平均"><span class="ca-k">均倍</span><b>${esc(row.avgXText || "—")}</b></span>
         <span class="ca-pill max"><span class="ca-k">最高</span><b>${esc(row.maxXText || "—")}</b></span>
         <span class="ca-pill"><span class="ca-k">胜场</span><b>${row.wins}/${row.settled ?? row.calls}</b></span>
-        ${row.pending ? `<span class="ca-pill" title="喊单不满 24 小时、还没到 1.5 倍，暂不计入胜率"><span class="ca-k">待定</span><b>${row.pending}</b></span>` : ""}
+        ${row.pending ? `<span class="ca-pill" title="喊单不满 ${pendingHours()} 小时、还没到 1.5 倍，暂不计入胜率"><span class="ca-k">待定</span><b>${row.pending}</b></span>` : ""}
       </div>
     </div>
     <button type="button" class="ca-star${on ? " on" : ""}" data-board-star="${esc(row.userId)}">${on ? "已星标" : "星标"}</button>
   </article>`;
+}
+
+function pendingHours() {
+  return Number(state.boardStats && state.boardStats.pendingHours) || 6;
 }
 
 const RANGE_TEXT = { all: "全部", today: "今天", "7d": "近 7 天", "30d": "近 30 天" };
@@ -913,16 +917,18 @@ function refreshBar(userId, calls) {
   let status = "";
   if (mine && job.running) {
     const left = Math.max(0, job.total - job.done);
-    status = `正在刷新 ${job.done}/${job.total}${left ? ` · 约 ${Math.ceil(left * 1.3)} 秒` : ""}`;
+    // 按已刷完的实际速度估算；还没刷完第一个时按每个约 3 秒。
+    const per = job.done && job.startedAt ? (Date.now() / 1000 - job.startedAt) / job.done : 3;
+    status = `正在刷新 ${job.done}/${job.total}${left ? ` · 约 ${Math.ceil(left * per)} 秒` : ""}`;
   } else if (mine && job.finishedAt) {
-    status = `刷新完成：${job.total} 个币，${job.updated} 个有变化${job.failed ? `，${job.failed} 个没取到 K 线` : ""}`;
+    status = `${job.timedOut ? `已到 ${Math.round((job.timeoutSec || 600) / 60)} 分钟上限，刷了 ${job.done}/${job.total} 个` : `刷新完成：${job.total} 个币`}，${job.updated} 个有变化${job.failed ? `，${job.failed} 个没取到 K 线` : ""}`;
   } else if (busy) {
     status = "另一个用户的刷新还在跑";
   }
   if (job && job.error) status = job.error;
   const pct = mine && job.total ? Math.round((job.done / job.total) * 100) : 0;
   return `<div class="ca-refresh" role="group" aria-label="立即刷新">
-    <button type="button" data-user-refresh="pending" ${busy || !pending ? "disabled" : ""} title="只刷待定的单：不满 24 小时、还没到 1.5 倍">刷新待定（${pending}）</button>
+    <button type="button" data-user-refresh="pending" ${busy || !pending ? "disabled" : ""} title="只刷待定的单：不满 ${pendingHours()} 小时、还没到 1.5 倍">刷新待定（${pending}）</button>
     <button type="button" data-user-refresh="range" ${busy || !inRange ? "disabled" : ""} title="刷新当前日期筛选内喊过的全部币">刷新${esc(RANGE_TEXT[range] || range)}（${inRange}）</button>
     <span class="ca-refresh-status" role="status" aria-live="polite">${esc(status)}</span>
     ${mine && job.running ? `<span class="ca-refresh-bar" aria-hidden="true"><i style="width:${pct}%"></i></span>` : ""}
@@ -1049,8 +1055,8 @@ function renderUserPage(userId) {
     const win = status === "win"
       ? `<span class="ca-pill win" title="喊单后最高 ≥ 该用户首次喊单市值的 1.5 倍（涨幅 50%）"><span class="ca-k">结果</span><b>胜</b></span>`
       : status === "pending"
-        ? `<span class="ca-pill" title="喊单不满 24 小时、还没到 1.5 倍，暂不计入胜率"><span class="ca-k">结果</span><b>待定</b></span>`
-        : `<span class="ca-pill" title="喊单 24 小时后仍未到首次喊单市值的 1.5 倍"><span class="ca-k">结果</span><b>未到 50%</b></span>`;
+        ? `<span class="ca-pill" title="喊单不满 ${pendingHours()} 小时、还没到 1.5 倍，暂不计入胜率"><span class="ca-k">结果</span><b>待定</b></span>`
+        : `<span class="ca-pill" title="喊单 ${pendingHours()} 小时后仍未到首次喊单市值的 1.5 倍"><span class="ca-k">结果</span><b>未到 50%</b></span>`;
     const first = item.isFirst ? `<span class="wf-debut">所有群首发</span>` : "";
     const when = window.WechatFeed.formatDateTime
       ? window.WechatFeed.formatDateTime(item.calledAt)
@@ -1082,7 +1088,7 @@ function renderBoardPage() {
   const starred = new Set(state.settings.starred_users || []);
   title.textContent = "CA 发现榜";
   const esc = window.WechatFeed.escapeText;
-  const rule = `<span class="ca-win-rule" title="相对该用户自己第一次喊到这个 CA 时的市值；喊单不满 24 小时且还没到的记为待定">胜：喊单后最高 ≥ 1.5 倍（涨幅 50%）</span>`;
+  const rule = `<span class="ca-win-rule" title="相对该用户自己第一次喊到这个 CA 时的市值；喊单不满 ${pendingHours()} 小时且还没到的记为待定">胜：喊单后最高 ≥ 1.5 倍（涨幅 50%）</span>`;
   const dormant = stats.dormant
     ? ` · <span title="超过 24 小时没人再喊、现市值不到 ${esc(moneyText(stats.dormantMcap || 15000))} 的暂停刷新，再被喊到自动恢复">${stats.dormant} 个休眠</span>`
     : "";

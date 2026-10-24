@@ -874,6 +874,17 @@ _RATE_WINDOW = 1.2
 _REALTIME_RESERVE = 2
 # 当前协程是否在后台刷榜：只影响限频优先级和 429 处理。
 _BACKGROUND: contextvars.ContextVar[bool] = contextvars.ContextVar("gmgn_bg", default=False)
+# 当前协程是否是用户点的「立即刷新」：限频规则同后台，但定时刷新要给它让路。
+_MANUAL: contextvars.ContextVar[bool] = contextvars.ContextVar("gmgn_manual", default=False)
+# 手动刷新按币数给超时：实测每个币约 3.3 秒，按 6 秒留一倍余量，至少 2 分钟、最多 30 分钟。
+# 到点无论任务是否跑完，定时刷新都会自动恢复，防止手动任务异常把后台永久挂住。
+MANUAL_PER_TOKEN = 6
+MANUAL_MIN = 120
+MANUAL_MAX = 1800
+
+
+def manual_timeout(count: int) -> int:
+    return max(MANUAL_MIN, min(MANUAL_MAX, 60 + int(count) * MANUAL_PER_TOKEN))
 
 
 class RateWindow:
@@ -938,6 +949,17 @@ class TokenIndex:
         self._gmgn_cooldown = 0.0
         self._bg_cooldown = 0.0
         self._live = 0
+        # 手动刷新在跑时（到 _manual_until 为止），定时刷新的 GMGN 请求全部暂停。
+        self._manual_until = 0.0
+
+    def manual_begin(self, seconds: float = MANUAL_MAX) -> None:
+        self._manual_until = time.time() + max(1.0, float(seconds))
+
+    def manual_end(self) -> None:
+        self._manual_until = 0.0
+
+    def manual_active(self) -> bool:
+        return time.time() < self._manual_until
 
     def meter_snapshot(self) -> dict[str, Any]:
         return self.meter.snapshot({"background": self._bg_cooldown, "auth": self._gmgn_cooldown})
@@ -1008,10 +1030,14 @@ class TokenIndex:
         last_mcap: float = 0.0,
         last_price: float = 0.0,
         anchors: list[int] | None = None,
+        manual: bool = False,
     ) -> dict[str, Any] | None:
-        """空闲刷新。已定链且有价格锚点时只打 K 线；否则 search 一次把价格写下。
+        """空闲刷新（manual=True 时是用户点的立即刷新）。
 
-        anchors 是各喊单/各群首喊时间，K 线按它们分段，保证每个喊单人都只算喊单之后。
+        已定链且有价格锚点时只打 K 线；否则 search 一次把价格写下。
+
+        anchors 是各喊单/各群首喊时间，K 线按它们分段，
+        保证每个喊单人都只算喊单之后。
         """
         if os.environ.get("WECHAT_FEED_DISABLE_TOKEN") == "1":
             return None
@@ -1020,6 +1046,7 @@ class TokenIndex:
             return None
         # 后台任务：不计入 _live（那是实时解析的计数），限频时给实时让路。
         flag = _BACKGROUND.set(True)
+        manual_flag = _MANUAL.set(bool(manual))
         try:
             chain_norm = _norm_chain(chain)
             if chain_norm and last_price > 0 and last_mcap > 0:
@@ -1039,6 +1066,7 @@ class TokenIndex:
                 token = await self._fill_ath(token, force=True, since=since, anchors=anchors)
             return token
         finally:
+            _MANUAL.reset(manual_flag)
             _BACKGROUND.reset(flag)
 
     async def resolve_one(
@@ -1069,10 +1097,13 @@ class TokenIndex:
         if not api_key:
             return None
         background = _BACKGROUND.get()
+        manual = _MANUAL.get()
         weight = _GMGN_WEIGHTS.get(path, 1)
 
         def note(outcome: str, **extra: Any) -> None:
-            self.meter.record(path, weight, background=background, outcome=outcome, **extra)
+            self.meter.record(
+                path, weight, background=background, manual=manual, outcome=outcome, **extra
+            )
 
         if time.time() < self._gmgn_cooldown:
             note("skipped")
@@ -1082,9 +1113,12 @@ class TokenIndex:
             queued = time.monotonic()
             yield_ms = 0.0
             if background:
-                # 实时解析在跑就先让开；后台被 429 过的冷却期内不再打。
-                while self._live > 0:
+                # 实时解析在跑就先让开；定时刷新还要给手动刷新让开（最长 10 分钟）。
+                while self._live > 0 or (not manual and self.manual_active()):
                     await asyncio.sleep(0.2)
+                if manual and time.time() < self._bg_cooldown:
+                    # 手动刷新碰上 429 冷却：等冷却过去再发，不要整批直接判失败。
+                    await asyncio.sleep(max(0.0, self._bg_cooldown - time.time()))
                 yield_ms = (time.monotonic() - queued) * 1000
                 if time.time() < self._bg_cooldown:
                     note("skipped")
@@ -1189,6 +1223,14 @@ class TokenIndex:
         if chain:
             extra["chain"] = gmgn_api_chain(chain)
         return await self._gmgn_call("/v1/market/search", extra)
+
+    async def _latest_price(self, address: str, chain: str) -> float:
+        coins, _wallets = await self._search_hits(address, chain)
+        want = gmgn_api_chain(chain)
+        same = [row for row in coins if gmgn_api_chain(str(row.get("chain") or "")) == want]
+        if not same:
+            return 0.0
+        return _num(_best_coin(same).get("price"))
 
     async def _search_hits(
         self, address: str, hint: str = ""
@@ -1324,6 +1366,10 @@ class TokenIndex:
             bars, last_close, ok = await self._since_bars(
                 chain, address, points, now, current_mcap, current_price
             )
+            if ok and last_close <= 0:
+                # 水位线之后没有成交，K 线给不出现价：用 search（权重 1）补一次，
+                # 否则死盘的「当前倍」会一直停在喊单时的旧值，休眠判断也会失准。
+                last_close = await self._latest_price(address, chain)
             token["klineBars"] = bars
             # klineOk/klineTo 给增量刷新推进水位线用。
             token["klineOk"] = ok
