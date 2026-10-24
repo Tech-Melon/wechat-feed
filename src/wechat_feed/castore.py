@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .gmgnstore import file_bytes
 from .tokens import peak_since
 
 KEEP_SECONDS = 365 * 24 * 3600
@@ -112,6 +113,7 @@ def call_status(multiple: float, called_at: int, now: int) -> str:
 class CaStore:
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
+        self._path = path
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(str(path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
@@ -172,6 +174,17 @@ class CaStore:
         )
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_ca_calls_time ON ca_calls(called_at)")
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_ca_tokens_time ON ca_tokens(first_at)")
+        # 手动删除过的时间段：启动时从 feed.db 回灌卡片，落在这些段里的不再写回榜单。
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ca_purged (
+                start INTEGER NOT NULL,
+                end INTEGER NOT NULL,
+                purged_at INTEGER NOT NULL,
+                PRIMARY KEY (start, end)
+            )
+            """
+        )
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_ca_group_firsts_time ON ca_group_firsts(first_at)"
         )
@@ -317,6 +330,8 @@ class CaStore:
 
     def remember(self, card: dict[str, Any], tokens: list[dict[str, Any]]) -> list[dict[str, Any]]:
         now = int(card.get("createTime") or time.time())
+        if self._is_purged(now):
+            return tokens
         caller_id = _text(card.get("senderUsername"))
         caller_name = _text(card.get("senderName") or card.get("displayName") or caller_id)
         group_id = _text(card.get("conversationId"))
@@ -1174,6 +1189,108 @@ class CaStore:
                 (chain, address, chain, address, chain, address),
             ).fetchall()
         return sorted({int(row["t"] or 0) for row in rows if int(row["t"] or 0) > 0})
+
+    # ---- 数据管理 ----
+
+    def _is_purged(self, at: int) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM ca_purged WHERE start <= ? AND ? < end LIMIT 1", (at, at)
+            ).fetchone()
+        return row is not None
+
+    def data_summary(self) -> dict[str, Any]:
+        with self._lock:
+            span = self._conn.execute(
+                "SELECT MIN(called_at), MAX(called_at), COUNT(*) FROM ca_calls WHERE called_at > 0"
+            ).fetchone()
+            months = self._conn.execute(
+                """
+                SELECT strftime('%Y-%m', called_at, 'unixepoch', 'localtime') AS month,
+                       COUNT(*) AS calls,
+                       COUNT(DISTINCT address) AS tokens,
+                       COUNT(DISTINCT caller_id) AS users
+                FROM ca_calls WHERE called_at > 0
+                GROUP BY month ORDER BY month DESC
+                """
+            ).fetchall()
+            tokens = self._count("SELECT COUNT(*) FROM ca_tokens")
+            purged = self._conn.execute(
+                "SELECT start, end, purged_at FROM ca_purged ORDER BY start DESC"
+            ).fetchall()
+        return {
+            "oldest": span[0],
+            "newest": span[1],
+            "calls": int(span[2] or 0),
+            "tokens": tokens,
+            "months": [
+                {
+                    "month": m["month"],
+                    "calls": int(m["calls"] or 0),
+                    "tokens": int(m["tokens"] or 0),
+                    "users": int(m["users"] or 0),
+                }
+                for m in months
+            ],
+            "purged": [dict(row) for row in purged],
+            "keepDays": KEEP_SECONDS // 86400,
+            "bytes": file_bytes(self._path),
+        }
+
+    def purge(self, start: int, end: int, dry_run: bool = True) -> dict[str, int]:
+        """删除喊单时间落在 [start, end) 的榜单记录。dry_run 只数不删。
+
+        喊单、群首喊按各自时间删；删完后没有任何喊单和群首喊的代币一起删掉。
+        同时记下这一段，启动回灌 feed.db 时不再把这段写回来。
+        """
+        with self._lock:
+            calls = self._count(
+                "SELECT COUNT(*) FROM ca_calls WHERE called_at >= ? AND called_at < ?",
+                (start, end),
+            )
+            groups = self._count(
+                "SELECT COUNT(*) FROM ca_group_firsts WHERE first_at >= ? AND first_at < ?",
+                (start, end),
+            )
+            orphan_sql = """
+                FROM ca_tokens t
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM ca_calls c
+                    WHERE c.chain = t.chain AND c.address = t.address
+                      AND NOT (c.called_at >= ? AND c.called_at < ?)
+                )
+                AND NOT EXISTS (
+                    SELECT 1 FROM ca_group_firsts g
+                    WHERE g.chain = t.chain AND g.address = t.address
+                      AND NOT (g.first_at >= ? AND g.first_at < ?)
+                )
+                AND t.first_at >= ? AND t.first_at < ?
+            """
+            span = (start, end, start, end, start, end)
+            tokens = self._count(f"SELECT COUNT(*) {orphan_sql}", span)
+            if not dry_run:
+                self._conn.execute(
+                    f"DELETE FROM ca_tokens WHERE rowid IN (SELECT t.rowid {orphan_sql})", span
+                )
+                self._conn.execute(
+                    "DELETE FROM ca_calls WHERE called_at >= ? AND called_at < ?", (start, end)
+                )
+                self._conn.execute(
+                    "DELETE FROM ca_group_firsts WHERE first_at >= ? AND first_at < ?",
+                    (start, end),
+                )
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO ca_purged (start, end, purged_at) VALUES (?, ?, ?)",
+                    (int(start), int(end), int(time.time())),
+                )
+                self._conn.commit()
+        return {"calls": calls, "groupFirsts": groups, "tokens": tokens}
+
+    def vacuum(self) -> int:
+        with self._lock:
+            self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            self._conn.execute("VACUUM")
+        return file_bytes(self._path)
 
     def _count(self, sql: str, params: tuple[Any, ...] = ()) -> int:
         return int(self._conn.execute(sql, params).fetchone()[0] or 0)

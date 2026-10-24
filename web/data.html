@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <title>数据管理 · 技术瓜群流</title>
+    <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/assets/gmgn.css?v=0.9.22" />
+  </head>
+  <body>
+    <header class="gm-top">
+      <a class="gm-back" href="/">← 返回群流</a>
+      <div class="gm-title">
+        <h1>数据管理</h1>
+        <p>排行榜（data/ca.db）与 GMGN 调用记录（data/gmgn.db）都保留 1 年，过期自动清理。这里可以手动删除某段时间。</p>
+      </div>
+      <a class="gm-back" href="/gmgn">GMGN 用量 →</a>
+    </header>
+
+    <main class="gm-main">
+      <section class="gm-card">
+        <header class="gm-card-head">
+          <h2>按时间段删除</h2>
+          <p class="gm-muted">先点「预览」看会删多少，确认后才真正删除。删除不可恢复。</p>
+        </header>
+        <form id="dm-form" class="dm-form">
+          <label>数据
+            <select id="dm-target">
+              <option value="board">排行榜喊单</option>
+              <option value="gmgn">GMGN 调用记录</option>
+              <option value="all">两者都删</option>
+            </select>
+          </label>
+          <label>快捷
+            <select id="dm-preset">
+              <option value="">自定义</option>
+              <option value="older30">30 天以前</option>
+              <option value="older90">90 天以前</option>
+              <option value="older180">180 天以前</option>
+              <option value="last1">最近 1 天</option>
+              <option value="last7">最近 7 天</option>
+              <option value="everything">全部</option>
+            </select>
+          </label>
+          <label>开始日期（含）<input id="dm-start" type="date" required /></label>
+          <label>结束日期（含）<input id="dm-end" type="date" required /></label>
+          <button type="submit">预览</button>
+        </form>
+        <div id="dm-preview" class="dm-preview" role="status" aria-live="polite"></div>
+      </section>
+
+      <section class="gm-card">
+        <header class="gm-card-head">
+          <h2>排行榜数据</h2>
+          <p id="dm-board-meta" class="gm-muted"></p>
+        </header>
+        <div class="gm-scroll"><table class="gm-table" id="dm-board"></table></div>
+        <p id="dm-purged" class="gm-hint"></p>
+      </section>
+
+      <section class="gm-card">
+        <header class="gm-card-head">
+          <h2>GMGN 调用记录</h2>
+          <p id="dm-gmgn-meta" class="gm-muted"></p>
+        </header>
+        <div class="gm-scroll"><table class="gm-table" id="dm-gmgn"></table></div>
+        <p class="gm-hint">逐条明细留 7 天（用于看具体请求），按分钟汇总留 1 年（用于历史曲线和统计）。</p>
+      </section>
+
+      <section class="gm-card">
+        <header class="gm-card-head">
+          <h2>压缩数据库</h2>
+          <button id="dm-vacuum" type="button" class="dm-btn">立即压缩</button>
+        </header>
+        <p class="gm-hint">删除后 SQLite 文件不会马上变小，压缩一次即可回收空间。数据多时可能要几秒。</p>
+        <p id="dm-vacuum-out" class="gm-muted" role="status" aria-live="polite"></p>
+      </section>
+    </main>
+    <script src="/assets/data.js?v=0.9.22"></script>
+  </body>
+</html>

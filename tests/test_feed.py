@@ -1797,3 +1797,182 @@ def test_background_budget_leaves_room_for_realtime() -> None:
     bg_elapsed, realtime_wait = asyncio.run(run())
     assert bg_elapsed >= 0.55  # 4 条至少跨 3 个完整窗口
     assert realtime_wait < 0.05
+
+
+def test_gmgn_meter_summary_peak_and_timeline() -> None:
+    from wechat_feed.gmgnmeter import GmgnMeter
+
+    meter = GmgnMeter(5, 1.2, 2)
+    kline = "/v1/market/token_kline"
+    search = "/v1/market/search"
+    meter.record(search, 1, background=False, outcome="ok", status=200, latency_ms=120, remaining=4)
+    meter.record(kline, 3, background=True, outcome="ok", status=200, latency_ms=300, remaining=1)
+    meter.record(kline, 3, background=True, outcome="limited", status=429, latency_ms=80)
+    meter.record(kline, 3, background=True, outcome="skipped")
+    meter.record(search, 1, background=False, outcome="biz", status=200, latency_ms=90)
+    snap = meter.snapshot({"background": 0.0})
+    five = snap["windows"]["5m"]
+    # 跳过的请求不算发出、不占权重。
+    assert five["calls"] == 4
+    assert five["weight"] == 1 + 3 + 3 + 1
+    assert five["outcomes"]["limited"] == 1
+    assert five["outcomes"]["skipped"] == 1
+    assert five["successRate"] == 0.5
+    # 同一个 1.2 秒窗口内连发，峰值就是总和，超过套餐 5 一眼可见。
+    assert five["peak"] == 8
+    # 峰值按发出时间算：间隔超过一个窗口发出的两条不叠加。
+    spaced = GmgnMeter(5, 1.2, 2)
+    base = __import__("time").time()
+    spaced.record(kline, 3, background=True, outcome="ok", at=base - 3.0)
+    spaced.record(kline, 3, background=True, outcome="ok", at=base - 1.7)
+    assert spaced.snapshot()["windows"]["1m"]["peak"] == 3
+    by_path = {row["path"]: row for row in five["paths"]}
+    assert by_path[kline]["background"] == 2
+    assert by_path[kline]["limited"] == 1
+    assert by_path[search]["realtime"] == 2
+    assert by_path[kline]["share"] == 0.75
+    assert snap["current"]["minRemaining5m"] == 1
+    assert snap["current"]["windowWeight"] == 8
+    assert sum(b["background"] + b["realtime"] for b in snap["timeline"]) == 8
+    assert sum(b["limited"] for b in snap["timeline"]) == 1
+    assert snap["recent"][0]["outcome"] == "biz"
+    assert snap["config"]["backgroundCap"] == 2.5
+    assert snap["totals"]["calls"] == 4
+
+
+def test_gmgn_stats_api_and_page(client: TestClient) -> None:
+    stats = client.get("/api/gmgn-stats")
+    assert stats.status_code == 200
+    body = stats.json()
+    assert body["ok"] is True
+    assert body["config"]["limit"] == 5
+    assert set(body["windows"]) == {"1m", "5m", "1h"}
+    assert "gmgn_" not in stats.text
+    page = client.get("/gmgn")
+    assert page.status_code == 200
+    assert "GMGN 用量" in page.text
+    assert client.get("/assets/gmgn.js").status_code == 200
+    assert 'href="/gmgn"' in (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+
+
+def test_gmgn_store_persists_history_and_purges(tmp_path: Path) -> None:
+    import time
+
+    from wechat_feed.gmgnmeter import GmgnMeter
+    from wechat_feed.gmgnstore import GmgnStore
+
+    kline = "/v1/market/token_kline"
+    db = GmgnStore(tmp_path / "gmgn.db")
+    meter = GmgnMeter(5, 1.2, 2)
+    now = time.time()
+    meter.record(kline, 3, background=True, outcome="ok", latency_ms=200, remaining=2, at=now - 30)
+    meter.record(
+        kline, 3, background=True, outcome="ok", latency_ms=300, remaining=1, at=now - 29.5
+    )
+    meter.record("/v1/market/search", 1, background=False, outcome="limited", at=now - 20)
+    batch, stats = meter.drain()
+    assert len(batch) == 3
+    db.write(batch, stats)
+    # 已经落盘的不会重复写。
+    assert meter.drain()[0] == []
+    hist = db.history("24h", now=now)
+    assert hist["totals"]["calls"] == 3
+    assert hist["totals"]["weight"] == 7
+    assert hist["totals"]["limited"] == 1
+    assert hist["totals"]["peak"] == 6
+    assert {row["path"] for row in hist["paths"]} == {kline, "/v1/market/search"}
+    # 重启：明细能装回新的 meter。
+    again = GmgnMeter(5, 1.2, 2)
+    again.preload(db.load_recent(3600, now=now))
+    restored = again.snapshot()["windows"]["5m"]
+    assert restored["calls"] == 3
+    # 速率按装回数据的真实跨度算（约 30 秒），不按刚启动的几毫秒算。
+    assert restored["weightPerSec"] < 0.5
+    summary = db.summary()
+    assert summary["rawRows"] == 3
+    assert summary["keepDays"] == 365
+    # 预览不删，确认才删。
+    preview = db.purge(now - 3600, now + 60, dry_run=True)
+    assert preview["rawRows"] == 3
+    assert db.summary()["rawRows"] == 3
+    db.purge(now - 3600, now + 60, dry_run=False)
+    assert db.summary()["rawRows"] == 0
+    assert db.history("24h", now=now)["totals"]["calls"] == 0
+    # 一年前的分钟汇总会被清掉。
+    old = GmgnMeter(5, 1.2, 2)
+    old.record(kline, 3, background=True, outcome="ok", at=now - 400 * 86400)
+    db.write(*old.drain())
+    db.prune(now=now)
+    assert db.summary()["minuteRows"] == 0
+    db.close()
+
+
+def test_ca_store_purge_period_survives_reimport(tmp_path: Path) -> None:
+    store = CaStore(tmp_path / "ca.db")
+    keep = "0x" + "c1" * 20
+    drop = "0x" + "c2" * 20
+    t_keep = 1_800_000_000
+    t_drop = t_keep + 40 * 86400
+    store.remember(
+        _call_card("k", "wxid_k", t_keep), [{"address": keep, "chain": "bsc", "marketCap": 1000}]
+    )
+    store.remember(
+        _call_card("d", "wxid_d", t_drop), [{"address": drop, "chain": "bsc", "marketCap": 1000}]
+    )
+    # 老币在删除段内又被喊过一次：只删那条喊单，币保留。
+    store.remember(
+        _call_card("k2", "wxid_x", t_drop + 60),
+        [{"address": keep, "chain": "bsc", "marketCap": 1200}],
+    )
+    preview = store.purge(t_drop - 10, t_drop + 3600, dry_run=True)
+    assert preview == {"calls": 2, "groupFirsts": 1, "tokens": 1}
+    assert len(store.board(now=t_drop + 7200)) == 3
+    store.purge(t_drop - 10, t_drop + 3600, dry_run=False)
+    tokens = {row[0] for row in store._conn.execute("SELECT address FROM ca_tokens")}
+    assert tokens == {keep}
+    assert [r["userId"] for r in store.board(now=t_drop + 7200)] == ["wxid_k"]
+    # 启动时从 feed.db 回灌同一张卡片，被删的那段不会写回来。
+    store.remember(
+        _call_card("d", "wxid_d", t_drop), [{"address": drop, "chain": "bsc", "marketCap": 1000}]
+    )
+    assert store._count("SELECT COUNT(*) FROM ca_calls WHERE called_at = ?", (t_drop,)) == 0
+    summary = store.data_summary()
+    assert summary["calls"] == 1
+    assert summary["purged"][0]["start"] == t_drop - 10
+    assert summary["keepDays"] == 365
+
+
+def test_data_api_requires_json_and_valid_range(client: TestClient) -> None:
+    summary = client.get("/api/data")
+    assert summary.status_code == 200
+    assert {"board", "gmgn"} <= set(summary.json())
+    # 跨站表单只能发 text/plain，不经过 CORS 预检，必须拒绝。
+    form = client.post(
+        "/api/data/purge",
+        content='{"target":"all","start":0,"end":1,"dryRun":false}',
+        headers={"Content-Type": "text/plain"},
+    )
+    assert form.status_code == 415
+    assert (
+        client.post("/api/data/purge", json={"target": "x", "start": 0, "end": 1}).status_code
+        == 400
+    )
+    assert (
+        client.post("/api/data/purge", json={"target": "all", "start": 5, "end": 5}).status_code
+        == 400
+    )
+    # 当前月：月末在未来，也要能预览。
+    future = int(__import__("time").time()) + 20 * 86400
+    ok = client.post("/api/data/purge", json={"target": "board", "start": 0, "end": future})
+    assert ok.status_code == 200
+    far = {"target": "board", "start": 0, "end": 9_999_999_999}
+    assert client.post("/api/data/purge", json=far).status_code == 400
+    dry = client.post("/api/data/purge", json={"target": "all", "start": 0, "end": 1000})
+    assert dry.status_code == 200
+    assert dry.json()["dryRun"] is True
+    assert client.post("/api/data/vacuum", json={}).status_code == 200
+    assert client.get("/data").status_code == 200
+    history = client.get("/api/gmgn-history?range=1y")
+    assert history.status_code == 200
+    assert history.json()["range"] == "1y"
+    assert len(history.json()["series"]) == 365

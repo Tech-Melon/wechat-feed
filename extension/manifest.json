@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "技术瓜群流",
-  "version": "0.9.21",
+  "version": "0.9.22",
   "author": "0xTechMelon",
   "homepage_url": "https://docs.jishugua.top",
   "description": "技术瓜出品。把本机微信群消息做成信息流，可插入 gmgn 推特监控页，也可在白名单网页上使用可拖拽浮窗。",

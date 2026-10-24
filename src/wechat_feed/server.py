@@ -29,6 +29,7 @@ from .config import (
     validate_group_id,
 )
 from .direct import DirectSource
+from .gmgnstore import HISTORY_RANGES, GmgnStore
 from .hub import Hub
 from .normalize import normalize_message_event
 from .store import CardStore
@@ -58,6 +59,35 @@ _PAGE_SIZE = 30
 _IDLE_GAP = 0.2
 _IDLE_POLL = 3
 _USER_ID = re.compile(r"^[A-Za-z0-9_@.\-]{1,80}$")
+# GMGN 计量每 5 秒批量落盘一次，每 6 小时清一次过期数据。
+_METER_FLUSH = 5.0
+_METER_PRUNE = 6 * 3600
+_PURGE_TARGETS = {"board", "gmgn", "all"}
+
+
+async def _flush_meter(stop: asyncio.Event, tokens: TokenIndex, gm: GmgnStore) -> None:
+    last_prune = 0.0
+    while True:
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=_METER_FLUSH)
+            stopping = True
+        except TimeoutError:
+            stopping = False
+        batch, stats = tokens.meter.drain()
+        if batch:
+            try:
+                await asyncio.to_thread(gm.write, batch, stats)
+            except Exception as exc:
+                tokens.meter.requeue(batch)
+                logger.info("GMGN 计量落盘失败: {}", type(exc).__name__)
+        if time.time() - last_prune > _METER_PRUNE:
+            last_prune = time.time()
+            try:
+                await asyncio.to_thread(gm.prune)
+            except Exception as exc:
+                logger.info("GMGN 计量清理失败: {}", type(exc).__name__)
+        if stopping:
+            return
 
 
 async def _idle_ca_refresh(
@@ -159,6 +189,7 @@ def create_app() -> FastAPI:
     cas = CaStore(data_dir() / "ca.db")
     hub = Hub(persist=persist, cas=cas)
     token_index = TokenIndex(lambda: str(store.get().get("gmgn_api_key") or ""))
+    gmgn_db = GmgnStore(data_dir() / "gmgn.db")
     direct = DirectSource(data_dir() / "direct.json")
     root = project_root()
 
@@ -176,8 +207,13 @@ def create_app() -> FastAPI:
         dropped = cas.prune_bad()
         if dropped:
             logger.info("已丢弃异常历史 CA {} 条", dropped)
+        gmgn_db.prune()
+        # 重启后把最近 1 小时的明细装回内存，用量页不会清零。
+        token_index.meter.preload(gmgn_db.load_recent(3600))
         stop = asyncio.Event()
-        tasks: list[asyncio.Task[None]] = []
+        tasks: list[asyncio.Task[None]] = [
+            asyncio.create_task(_flush_meter(stop, token_index, gmgn_db))
+        ]
         if os.environ.get("WECHAT_FEED_DISABLE_UPSTREAM") != "1":
             tasks.append(asyncio.create_task(backfill_history(store, hub, stop, direct)))
             tasks.append(asyncio.create_task(supervise(store, hub, stop, token_index, direct)))
@@ -189,6 +225,11 @@ def create_app() -> FastAPI:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        # 退出前把最后一批计量写进库。
+        batch, stats = token_index.meter.drain()
+        if batch:
+            gmgn_db.write(batch, stats)
+        gmgn_db.close()
         await feed_http.aclose()
 
     app = FastAPI(title="技术瓜群流", lifespan=lifespan)
@@ -623,6 +664,81 @@ def create_app() -> FastAPI:
             "board": cas.board(window),
             "stats": cas.stats(),
         }
+
+    @app.get("/api/gmgn-stats")
+    def gmgn_stats() -> dict[str, Any]:
+        """GMGN 调用计量：最近 1 小时实时面板（不含 Key 与请求参数）。"""
+        return {"ok": True, "hasKey": token_index.has_key(), **token_index.meter_snapshot()}
+
+    @app.get("/api/gmgn-history")
+    async def gmgn_history(range: str = "24h") -> dict[str, Any]:  # noqa: A002 - 查询参数名
+        window = range if range in HISTORY_RANGES else "24h"
+        return {"ok": True, **(await asyncio.to_thread(gmgn_db.history, window))}
+
+    @app.get("/api/data")
+    async def data_summary() -> dict[str, Any]:
+        board = await asyncio.to_thread(cas.data_summary)
+        gmgn = await asyncio.to_thread(gmgn_db.summary)
+        return {"ok": True, "board": board, "gmgn": gmgn}
+
+    async def _json_body(request: Request) -> dict[str, Any]:
+        # 只收 application/json：跨站表单 POST 发不了这个类型，必须先过 CORS 预检，网页删不了数据。
+        kind = str(request.headers.get("content-type") or "").split(";")[0].strip().lower()
+        if kind != "application/json":
+            raise HTTPException(status_code=415, detail="只接受 application/json")
+        try:
+            body = await request.json()
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail="不是合法 JSON") from exc
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="请求体必须是对象")
+        return body
+
+    @app.post("/api/data/purge")
+    async def data_purge(request: Request) -> dict[str, Any]:
+        body = await _json_body(request)
+        target = str(body.get("target") or "")
+        if target not in _PURGE_TARGETS:
+            raise HTTPException(status_code=400, detail="target 只能是 board / gmgn / all")
+        try:
+            start = int(body.get("start"))
+            end = int(body.get("end"))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="start / end 必须是秒级时间戳") from exc
+        # 结束时间可以在未来（删「当前这个月」时月末就在未来），只拦离谱的时间戳。
+        if start < 0 or end <= start or end > 4_102_444_800:
+            raise HTTPException(status_code=400, detail="时间范围不合法")
+        dry_run = body.get("dryRun", True) is not False
+        out: dict[str, Any] = {"ok": True, "dryRun": dry_run, "start": start, "end": end}
+        if target in {"board", "all"}:
+            out["board"] = await asyncio.to_thread(cas.purge, start, end, dry_run)
+        if target in {"gmgn", "all"}:
+            if not dry_run:
+                token_index.meter.forget(start, end)
+            out["gmgn"] = await asyncio.to_thread(gmgn_db.purge, start, end, dry_run)
+        if not dry_run:
+            logger.info("手动删除数据 target={} {}~{}", target, start, end)
+            if target in {"board", "all"}:
+                hub.notify_board()
+        return out
+
+    @app.post("/api/data/vacuum")
+    async def data_vacuum(request: Request) -> dict[str, Any]:
+        await _json_body(request)
+        board = await asyncio.to_thread(cas.vacuum)
+        gmgn = await asyncio.to_thread(gmgn_db.vacuum)
+        return {"ok": True, "boardBytes": board, "gmgnBytes": gmgn}
+
+    @app.get("/data")
+    def data_page() -> FileResponse:
+        return FileResponse(root / "web" / "data.html", headers={"Cache-Control": "no-store"})
+
+    @app.get("/gmgn")
+    def gmgn_page() -> FileResponse:
+        return FileResponse(
+            root / "web" / "gmgn.html",
+            headers={"Cache-Control": "no-store"},
+        )
 
     @app.get("/api/ca-board/user/{user_id}")
     def ca_board_user(user_id: str) -> dict[str, Any]:

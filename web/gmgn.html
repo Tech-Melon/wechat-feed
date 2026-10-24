@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <title>GMGN 用量 · 技术瓜群流</title>
+    <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/assets/gmgn.css?v=0.9.22" />
+  </head>
+  <body>
+    <header class="gm-top">
+      <a class="gm-back" href="/">← 返回群流</a>
+      <div class="gm-title">
+        <h1>GMGN 用量</h1>
+        <p id="gm-config">正在读取…</p>
+      </div>
+      <span id="gm-status" class="gm-badge" role="status" aria-live="polite">—</span>
+      <label class="gm-auto"><input id="gm-auto" type="checkbox" checked /> 每 2 秒刷新</label>
+    </header>
+
+    <main class="gm-main">
+      <section class="gm-kpis" id="gm-kpis" aria-label="关键指标"></section>
+
+      <section class="gm-card">
+        <header class="gm-card-head">
+          <h2>最近 10 分钟权重 / 秒</h2>
+          <div class="gm-legend" aria-hidden="true">
+            <span><i class="sw rt"></i>实时</span>
+            <span><i class="sw bg"></i>后台刷榜</span>
+            <span><i class="ln cap"></i>套餐上限</span>
+            <span><i class="ln safe"></i>本地上限</span>
+            <span><i class="ln bgcap"></i>后台上限</span>
+            <span><i class="dot lim"></i>429</span>
+            <span><i class="dot fail"></i>失败</span>
+          </div>
+        </header>
+        <div id="gm-chart" class="gm-chart"></div>
+        <p class="gm-hint">每根柱是 10 秒内的平均权重/秒。限频看的是任意一个窗口内的瞬时峰值，见上方「5 分钟峰值（任意 1 秒）」。</p>
+      </section>
+
+      <section class="gm-card">
+        <header class="gm-card-head">
+          <h2>历史用量</h2>
+          <div class="gm-seg" role="tablist" aria-label="历史范围">
+            <button type="button" data-hist="24h" class="on">24 小时</button>
+            <button type="button" data-hist="7d">7 天</button>
+            <button type="button" data-hist="30d">30 天</button>
+            <button type="button" data-hist="1y">1 年</button>
+          </div>
+        </header>
+        <section class="gm-kpis" id="gm-hist-kpis" aria-label="历史汇总"></section>
+        <div id="gm-hist" class="gm-hist"></div>
+        <p class="gm-hint">柱是每个时段的平均权重/秒（实时 + 后台），红线是该时段内任意 1 秒的最高峰值，对比套餐上限。数据存在 data/gmgn.db，保留 1 年，可在 <a href="/data">数据管理</a> 里删除。</p>
+        <div class="gm-scroll"><table class="gm-table" id="gm-hist-paths"></table></div>
+      </section>
+
+      <section class="gm-card">
+        <header class="gm-card-head">
+          <h2>按接口</h2>
+          <div class="gm-seg" role="tablist" aria-label="统计时间">
+            <button type="button" data-win="1m">1 分钟</button>
+            <button type="button" data-win="5m" class="on">5 分钟</button>
+            <button type="button" data-win="1h">1 小时</button>
+          </div>
+        </header>
+        <div class="gm-scroll"><table class="gm-table" id="gm-paths"></table></div>
+      </section>
+
+      <section class="gm-card">
+        <header class="gm-card-head">
+          <h2>最近 40 次请求</h2>
+          <p id="gm-totals" class="gm-muted"></p>
+        </header>
+        <div class="gm-scroll"><table class="gm-table" id="gm-recent"></table></div>
+      </section>
+      <p class="gm-foot">实时面板看最近 1 小时，重启后从 data/gmgn.db 恢复；不记录 Key 和请求参数。</p>
+    </main>
+    <script src="/assets/gmgn.js?v=0.9.22"></script>
+  </body>
+</html>

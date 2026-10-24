@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 import httpx
 from loguru import logger
 
+from .gmgnmeter import GmgnMeter
 from .http import client as http_client
 
 _EVM = re.compile(r"0x[a-fA-F0-9]{40}(?![a-fA-F0-9])")
@@ -932,10 +933,14 @@ class TokenIndex:
         self._cache: dict[str, tuple[float, dict[str, Any] | None]] = {}
         self._lock = asyncio.Lock()
         self._rate = RateWindow(_plan_weight(), window=_RATE_WINDOW)
+        self.meter = GmgnMeter(self._rate.limit, _RATE_WINDOW, _REALTIME_RESERVE)
         # 鉴权失败时全部停；限频只停后台，实时退避 1 秒重试。
         self._gmgn_cooldown = 0.0
         self._bg_cooldown = 0.0
         self._live = 0
+
+    def meter_snapshot(self) -> dict[str, Any]:
+        return self.meter.snapshot({"background": self._bg_cooldown, "auth": self._gmgn_cooldown})
 
     def idle(self) -> bool:
         now = time.time()
@@ -1064,20 +1069,30 @@ class TokenIndex:
         if not api_key:
             return None
         background = _BACKGROUND.get()
+        weight = _GMGN_WEIGHTS.get(path, 1)
+
+        def note(outcome: str, **extra: Any) -> None:
+            self.meter.record(path, weight, background=background, outcome=outcome, **extra)
+
         if time.time() < self._gmgn_cooldown:
+            note("skipped")
             return None
         last_status = 0
-        weight = _GMGN_WEIGHTS.get(path, 1)
         for attempt in range(2):
+            queued = time.monotonic()
             if background:
                 # 实时解析在跑就先让开；后台被 429 过的冷却期内不再打。
                 while self._live > 0:
                     await asyncio.sleep(0.2)
                 if time.time() < self._bg_cooldown:
+                    note("skipped")
                     return None
                 await self._rate.acquire(weight, reserve=_REALTIME_RESERVE)
             else:
                 await self._rate.acquire(weight)
+            wait_ms = (time.monotonic() - queued) * 1000
+            sent_at = time.monotonic()
+            sent_wall = time.time()
             params = {
                 "timestamp": str(int(time.time())),
                 "client_id": str(uuid.uuid4()),
@@ -1090,8 +1105,17 @@ class TokenIndex:
                     headers=_gmgn_headers(api_key),
                 )
                 last_status = response.status_code
-                self._rate.sync(_remaining(response))
+                left = _remaining(response)
+                self._rate.sync(left)
+                timing = {
+                    "status": response.status_code,
+                    "latency_ms": (time.monotonic() - sent_at) * 1000,
+                    "wait_ms": wait_ms,
+                    "remaining": left,
+                    "at": sent_wall,
+                }
                 if response.status_code in {429, 408}:
+                    note("limited", **timing)
                     logger.info(
                         "GMGN 限频 {} status={} {}",
                         path,
@@ -1110,6 +1134,7 @@ class TokenIndex:
                         continue
                     return None
                 if response.status_code in {401, 403}:
+                    note("auth", **timing)
                     self._gmgn_cooldown = time.time() + 90
                     logger.info("GMGN 鉴权失败 status={}", response.status_code)
                     return None
@@ -1121,12 +1146,15 @@ class TokenIndex:
                             detail = str(payload.get("message") or payload.get("msg") or "")[:80]
                     except Exception:
                         detail = response.text[:80]
+                    note("error", **timing)
                     logger.info("GMGN {} status={} {}", path, response.status_code, detail)
                     if "timestamp" in detail.lower():
                         await asyncio.sleep(0.2)
                         continue
                     return None
                 loaded = response.json()
+                code = loaded.get("code") if isinstance(loaded, dict) else None
+                note("ok" if code in (None, 0, "0") else "biz", **timing)
                 unwrapped = _unwrap(loaded)
                 return (
                     unwrapped
@@ -1134,6 +1162,12 @@ class TokenIndex:
                     else (loaded if isinstance(loaded, dict) else None)
                 )
             except Exception as exc:
+                note(
+                    "exception",
+                    latency_ms=(time.monotonic() - sent_at) * 1000,
+                    wait_ms=wait_ms,
+                    at=sent_wall,
+                )
                 logger.info("GMGN {} 失败: {}", path, type(exc).__name__)
                 return None
         if last_status:
