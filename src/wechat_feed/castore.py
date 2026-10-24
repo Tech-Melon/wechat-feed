@@ -40,6 +40,10 @@ PENDING_AGE = 24 * 3600
 # 均倍按单条 20 倍封顶，避免一个百倍单主导得分；最高倍仍显示真实值。
 AVG_CAP = 20.0
 BOARD_RANGES = {"all": KEEP_SECONDS, "30d": 30 * 86400, "7d": 7 * 86400}
+# 用户详情页的日期筛选，today 另按本地 0 点算。
+USER_RANGES = {"all": KEEP_SECONDS, "30d": 30 * 86400, "7d": 7 * 86400, "today": 86400}
+# 手动刷新一次最多刷这么多个币（后台约 1.2 秒一个，100 个约 2 分钟）。
+REFRESH_MAX = 100
 
 
 def _num(value: Any) -> float:
@@ -907,6 +911,60 @@ class CaStore:
                     "groupId": _text(row["group_id"]),
                     "groupName": _text(row["group_name"]),
                     "cardId": _text(row["card_id"]),
+                }
+            )
+        return out
+
+    def refresh_targets(
+        self, user_id: str, scope: str = "pending", window: str = "7d", now: int | None = None
+    ) -> list[dict[str, Any]]:
+        """某个用户要立即刷新的币（同一个币只刷一次，新喊的在前）。
+
+        scope=pending：只刷待定（不满 24 小时且还没到 1.5 倍）；
+        scope=range：刷 window（today / 7d / 30d / all）内喊过的全部。
+        """
+        stamp = int(now or time.time())
+        if scope == "pending":
+            since = stamp - PENDING_AGE
+        else:
+            since = stamp - USER_RANGES.get(window, KEEP_SECONDS)
+            if window == "today":
+                local = time.localtime(stamp)
+                since = int(
+                    time.mktime((local.tm_year, local.tm_mon, local.tm_mday, 0, 0, 0, 0, 0, -1))
+                )
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT c.chain, c.address, c.mcap, c.called_at,
+                       COALESCE(NULLIF(c.ath_mcap, 0), t.last_mcap) AS call_ath,
+                       t.last_mcap, t.last_price
+                FROM ca_calls c
+                JOIN ca_tokens t ON t.chain = c.chain AND t.address = c.address
+                WHERE c.caller_id = ? AND c.called_at >= ? AND t.first_mcap > 0
+                ORDER BY c.called_at DESC
+                """,
+                (_text(user_id), max(since, self.cutoff())),
+            ).fetchall()
+        out: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for row in rows:
+            key = (_text(row["chain"]), _text(row["address"]))
+            if key in seen or not key[1]:
+                continue
+            call_mcap = _num(row["mcap"])
+            peak = max(_num(row["call_ath"]), _num(row["last_mcap"]), call_mcap)
+            if scope == "pending":
+                multiple = _multiple(peak, call_mcap)
+                if call_status(multiple, int(row["called_at"] or 0), stamp) != "pending":
+                    continue
+            seen.add(key)
+            out.append(
+                {
+                    "chain": key[0],
+                    "address": key[1],
+                    "last_mcap": _num(row["last_mcap"]),
+                    "last_price": _num(row["last_price"]),
                 }
             )
         return out

@@ -19,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
 from . import http as feed_http
-from .castore import BOARD_RANGES, CaStore
+from .castore import BOARD_RANGES, REFRESH_MAX, USER_RANGES, CaStore
 from .config import (
     SettingsStore,
     data_dir,
@@ -90,12 +90,81 @@ async def _flush_meter(stop: asyncio.Event, tokens: TokenIndex, gm: GmgnStore) -
             return
 
 
+class RefreshJob:
+    """用户详情页点「立即刷新」后的手动任务。同一时间只跑一个，跑的时候后台定时刷新让开。"""
+
+    def __init__(self) -> None:
+        self.task: asyncio.Task[None] | None = None
+        self.state: dict[str, Any] = {"running": False}
+
+    @property
+    def running(self) -> bool:
+        return self.task is not None and not self.task.done()
+
+    def start(
+        self,
+        user_id: str,
+        scope: str,
+        window: str,
+        targets: list[dict[str, Any]],
+        cas: CaStore,
+        tokens: TokenIndex,
+        hub: Hub,
+    ) -> dict[str, Any]:
+        self.state = {
+            "running": True,
+            "userId": user_id,
+            "scope": scope,
+            "range": window,
+            "total": len(targets),
+            "done": 0,
+            "updated": 0,
+            "failed": 0,
+            "startedAt": time.time(),
+            "finishedAt": 0.0,
+        }
+        self.task = asyncio.create_task(self._run(targets, cas, tokens, hub))
+        return dict(self.state)
+
+    async def _run(
+        self, targets: list[dict[str, Any]], cas: CaStore, tokens: TokenIndex, hub: Hub
+    ) -> None:
+        try:
+            for row in targets:
+                chain = row["chain"]
+                address = row["address"]
+                anchors = cas.plan_anchors(chain, address)
+                try:
+                    quote = await tokens.quote(
+                        address,
+                        chain,
+                        last_mcap=float(row.get("last_mcap") or 0),
+                        last_price=float(row.get("last_price") or 0),
+                        anchors=anchors,
+                    )
+                except Exception as exc:
+                    logger.info("手动刷新 CA 失败: {}", type(exc).__name__)
+                    quote = None
+                if quote is None or not quote.get("klineOk"):
+                    self.state["failed"] += 1
+                    cas.mark_attempt(chain, address)
+                elif cas.apply_quote(chain, address, quote, anchors=anchors):
+                    self.state["updated"] += 1
+                    hub.notify_board()
+                self.state["done"] += 1
+        finally:
+            self.state["running"] = False
+            self.state["finishedAt"] = time.time()
+            hub.notify_board()
+
+
 async def _idle_ca_refresh(
     stop: asyncio.Event,
     cas: CaStore,
     tokens: TokenIndex,
     store: SettingsStore,
     hub: Hub,
+    job: RefreshJob | None = None,
 ) -> None:
     """后台刷榜：先首结算新喊单，再按热度增量刷新。实时解析优先，后台只用剩余额度。"""
     try:
@@ -112,8 +181,8 @@ async def _idle_ca_refresh(
             if not tokens.has_key():
                 await asyncio.wait_for(stop.wait(), timeout=20)
                 continue
-            if not tokens.idle():
-                # 实时解析在跑或后台被 429 冷却中：短等再看，不再一停 8 秒。
+            if not tokens.idle() or (job is not None and job.running):
+                # 实时解析在跑、后台被 429 冷却中，或手动刷新在跑：短等再看。
                 await asyncio.wait_for(stop.wait(), timeout=1)
                 continue
             row = cas.next_due(int(time.time()))
@@ -190,6 +259,7 @@ def create_app() -> FastAPI:
     hub = Hub(persist=persist, cas=cas)
     token_index = TokenIndex(lambda: str(store.get().get("gmgn_api_key") or ""))
     gmgn_db = GmgnStore(data_dir() / "gmgn.db")
+    refresh_job = RefreshJob()
     direct = DirectSource(data_dir() / "direct.json")
     root = project_root()
 
@@ -218,7 +288,11 @@ def create_app() -> FastAPI:
             tasks.append(asyncio.create_task(backfill_history(store, hub, stop, direct)))
             tasks.append(asyncio.create_task(supervise(store, hub, stop, token_index, direct)))
         if os.environ.get("WECHAT_FEED_DISABLE_TOKEN") != "1":
-            tasks.append(asyncio.create_task(_idle_ca_refresh(stop, cas, token_index, store, hub)))
+            tasks.append(
+                asyncio.create_task(
+                    _idle_ca_refresh(stop, cas, token_index, store, hub, refresh_job)
+                )
+            )
         yield
         stop.set()
         for task in tasks:
@@ -739,6 +813,34 @@ def create_app() -> FastAPI:
             root / "web" / "gmgn.html",
             headers={"Cache-Control": "no-store"},
         )
+
+    @app.post("/api/ca-board/user/{user_id}/refresh")
+    async def ca_board_refresh(user_id: str, request: Request) -> dict[str, Any]:
+        """立即刷新某个用户的喊单：scope=pending 只刷待定，scope=range 刷 range 内全部。"""
+        ident = str(user_id or "").strip()
+        if not _USER_ID.match(ident):
+            raise HTTPException(status_code=400, detail="用户名不合法")
+        body = await _json_body(request)
+        scope = str(body.get("scope") or "pending")
+        window = str(body.get("range") or "7d")
+        if scope not in {"pending", "range"} or window not in USER_RANGES:
+            raise HTTPException(status_code=400, detail="scope / range 不合法")
+        if not store.get().get("ca_board", True):
+            raise HTTPException(status_code=400, detail="排行榜已关闭")
+        if not token_index.has_key():
+            raise HTTPException(status_code=400, detail="还没有配置 GMGN Key")
+        if refresh_job.running:
+            raise HTTPException(status_code=409, detail="上一次刷新还没跑完")
+        targets = await asyncio.to_thread(cas.refresh_targets, ident, scope, window)
+        capped = len(targets) > REFRESH_MAX
+        state = refresh_job.start(
+            ident, scope, window, targets[:REFRESH_MAX], cas, token_index, hub
+        )
+        return {"ok": True, "capped": capped, "matched": len(targets), **state}
+
+    @app.get("/api/ca-board/refresh")
+    def ca_board_refresh_state() -> dict[str, Any]:
+        return {"ok": True, **refresh_job.state}
 
     @app.get("/api/ca-board/user/{user_id}")
     def ca_board_user(user_id: str) -> dict[str, Any]:

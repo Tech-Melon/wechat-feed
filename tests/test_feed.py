@@ -1979,3 +1979,35 @@ def test_data_api_requires_json_and_valid_range(client: TestClient) -> None:
     assert history.status_code == 200
     assert history.json()["range"] == "1y"
     assert len(history.json()["series"]) == 365
+
+
+def test_user_refresh_targets_and_api(tmp_path: Path, client: TestClient) -> None:
+    store = CaStore(tmp_path / "ca.db")
+    now = 1_800_000_000 + 10 * 86400
+    rows = [
+        ("0x" + "d1" * 20, now - 3600, 1000, 1100),  # 待定
+        ("0x" + "d2" * 20, now - 1800, 1000, 2000),  # 已胜
+        ("0x" + "d3" * 20, now - 3 * 86400, 1000, 1000),  # 近 7 天、已负
+        ("0x" + "d4" * 20, now - 20 * 86400, 1000, 1000),  # 近 30 天
+    ]
+    for i, (addr, at, mcap, peak) in enumerate(rows):
+        store.remember(
+            _call_card(f"r{i}", "wxid_r", at),
+            [{"address": addr, "chain": "bsc", "marketCap": mcap}],
+        )
+        store._conn.execute("UPDATE ca_calls SET ath_mcap = ? WHERE address = ?", (peak, addr))
+    store._conn.commit()
+
+    def pick(scope: str, window: str = "7d") -> list[str]:
+        return [r["address"] for r in store.refresh_targets("wxid_r", scope, window, now=now)]
+
+    assert pick("pending") == [rows[0][0]]
+    assert pick("range", "7d") == [rows[1][0], rows[0][0], rows[2][0]]
+    assert len(pick("range", "30d")) == 4
+    assert pick("range", "all") == pick("range", "30d")
+    # 接口：Key 没配置时拒绝，参数不合法拒绝，非 JSON 拒绝。
+    url = "/api/ca-board/user/wxid_r/refresh"
+    assert client.post(url, json={"scope": "x"}).status_code == 400
+    assert client.post(url, json={"scope": "pending"}).status_code == 400
+    assert client.post(url, content="{}", headers={"Content-Type": "text/plain"}).status_code == 415
+    assert client.get("/api/ca-board/refresh").json()["running"] is False

@@ -39,6 +39,7 @@ const state = {
   userRange: "all",
   userWin: "all",
   boardRange: "all",
+  userRefresh: null,
 };
 
 function emptyFeedCache() {
@@ -898,6 +899,83 @@ function personRow(row, starred) {
   </article>`;
 }
 
+const RANGE_TEXT = { all: "全部", today: "今天", "7d": "近 7 天", "30d": "近 30 天" };
+
+function refreshBar(userId, calls) {
+  const esc = window.WechatFeed.escapeText;
+  const job = state.userRefresh;
+  const mine = job && job.userId === userId;
+  const busy = Boolean(job && job.running);
+  const pending = new Set(calls.filter((c) => callStatus(c) === "pending").map((c) => `${c.chain}|${c.address}`)).size;
+  const range = state.userRange || "all";
+  const start = rangeStart(range);
+  const inRange = new Set(calls.filter((c) => !start || (Number(c.calledAt) || 0) >= start).map((c) => `${c.chain}|${c.address}`)).size;
+  let status = "";
+  if (mine && job.running) {
+    const left = Math.max(0, job.total - job.done);
+    status = `正在刷新 ${job.done}/${job.total}${left ? ` · 约 ${Math.ceil(left * 1.3)} 秒` : ""}`;
+  } else if (mine && job.finishedAt) {
+    status = `刷新完成：${job.total} 个币，${job.updated} 个有变化${job.failed ? `，${job.failed} 个没取到 K 线` : ""}`;
+  } else if (busy) {
+    status = "另一个用户的刷新还在跑";
+  }
+  if (job && job.error) status = job.error;
+  const pct = mine && job.total ? Math.round((job.done / job.total) * 100) : 0;
+  return `<div class="ca-refresh" role="group" aria-label="立即刷新">
+    <button type="button" data-user-refresh="pending" ${busy || !pending ? "disabled" : ""} title="只刷待定的单：不满 24 小时、还没到 1.5 倍">刷新待定（${pending}）</button>
+    <button type="button" data-user-refresh="range" ${busy || !inRange ? "disabled" : ""} title="刷新当前日期筛选内喊过的全部币">刷新${esc(RANGE_TEXT[range] || range)}（${inRange}）</button>
+    <span class="ca-refresh-status" role="status" aria-live="polite">${esc(status)}</span>
+    ${mine && job.running ? `<span class="ca-refresh-bar" aria-hidden="true"><i style="width:${pct}%"></i></span>` : ""}
+  </div>`;
+}
+
+let refreshTimer = 0;
+
+async function pollRefresh(userId) {
+  clearTimeout(refreshTimer);
+  try {
+    const job = await readJson(await fetch("/api/ca-board/refresh", { cache: "no-store" }));
+    state.userRefresh = job;
+    const route = boardRoute();
+    if (job.running) {
+      if (route.view === "user" && route.userId === userId) {
+        // 跑的过程中顺手拉一次详情，已刷完的币先更新。
+        if (job.done && job.done % 5 === 0) await loadUserCalls(userId);
+        renderUserPage(userId);
+      }
+      refreshTimer = setTimeout(() => pollRefresh(userId), 1500);
+      return;
+    }
+    if (route.view === "user" && route.userId === userId) {
+      await loadUserCalls(userId);
+      renderUserPage(userId);
+    }
+    scheduleBoard();
+  } catch (error) {
+    state.userRefresh = { error: `刷新状态读取失败：${error.message}` };
+    renderBoard();
+  }
+}
+
+async function startRefresh(userId, scope) {
+  try {
+    const job = await readJson(
+      await fetch(`/api/ca-board/user/${encodeURIComponent(userId)}/refresh`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ scope, range: state.userRange || "all" }),
+      }),
+    );
+    state.userRefresh = job;
+    if (job.capped) setNotice(`符合条件的有 ${job.matched} 个币，这次先刷最近的 ${job.total} 个`);
+    renderUserPage(userId);
+    pollRefresh(userId);
+  } catch (error) {
+    state.userRefresh = { error: error.message };
+    renderUserPage(userId);
+  }
+}
+
 function renderUserPage(userId) {
   const title = document.querySelector("#ca-page-title");
   const sub = document.querySelector("#ca-page-sub");
@@ -953,6 +1031,7 @@ function renderUserPage(userId) {
       <button type="button" data-user-win="lose" class="${winOn("lose")}">未到 50%</button>
     </div>
   </div>
+  ${refreshBar(user.userId, all)}
   <p class="ca-filter-hint">${calls.length === all.length ? `${all.length} 条` : `显示 ${calls.length} / ${all.length} 条`}</p>`;
   if (!all.length) {
     box.innerHTML = `${head}<p class="ca-empty">这个人还没有记入有效 CA。</p>`;
@@ -1732,6 +1811,16 @@ document.addEventListener("click", (event) => {
     event.stopPropagation();
     state.userRange = rangeBtn.dataset.userRange || "all";
     if (boardRoute().view === "user") renderUserPage(boardRoute().userId);
+    return;
+  }
+  const refreshBtn = event.target.closest("[data-user-refresh]");
+  if (refreshBtn) {
+    event.preventDefault();
+    event.stopPropagation();
+    const route = boardRoute();
+    if (route.view === "user" && route.userId && !refreshBtn.disabled) {
+      startRefresh(route.userId, refreshBtn.dataset.userRefresh);
+    }
     return;
   }
   const boardRangeBtn = event.target.closest("[data-board-range]");

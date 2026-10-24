@@ -1469,3 +1469,15 @@ body.is-board .ca-strip { display: none; }
   .runtime { justify-self: start; }
   .author { flex-wrap: wrap; }
 }
+
+.ca-refresh { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 6px 0 2px; }
+.ca-refresh button {
+  height: 30px; padding: 0 12px; border-radius: 999px; border: 1px solid #d0d5dd;
+  background: #fff; color: #111827; font: inherit; font-size: 12px; cursor: pointer;
+}
+.ca-refresh button:hover:not(:disabled) { border-color: #0f9f6e; color: #067647; }
+.ca-refresh button:disabled { opacity: 0.45; cursor: not-allowed; }
+.ca-refresh button:focus-visible { outline: 2px solid #0f9f6e; outline-offset: 2px; }
+.ca-refresh-status { color: var(--muted); font-size: 12px; }
+.ca-refresh-bar { width: 120px; height: 6px; border-radius: 6px; background: #f2f4f7; overflow: hidden; }
+.ca-refresh-bar i { display: block; height: 100%; background: #0f9f6e; transition: width 0.4s; }
