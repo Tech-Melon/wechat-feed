@@ -42,6 +42,9 @@
   let imagePreview = null;
 
   const avatarCache = new Map();
+  // 浮窗先显示一页，滚到底再多显示一页（不够就向后台要更早的）；回到顶部后收回一页，DOM 保持小。
+  const FLOAT_PAGE = 80;
+  let floatLimit = FLOAT_PAGE;
   const MIN_FLOAT_W = 280;
   const MIN_FLOAT_H = 220;
   const TOP_SLOT_LIMIT = 20;
@@ -527,12 +530,41 @@
       if (next && img.contains(next)) return;
       hideImagePreview();
     });
-    list.addEventListener("scroll", () => {
-      if (!hasMore) return;
-      if (list.scrollTop + list.clientHeight >= list.scrollHeight - 48) {
-        requestSnapshot(true);
+  }
+
+  // 只有浮窗的 .list 会滚动；插入推文流的列表跟着 gmgn 页面走。
+  function bindFloatScroll(host, list) {
+    const toTop = host._toTop;
+    let frame = 0;
+    const update = () => {
+      frame = 0;
+      const top = list.scrollTop;
+      // 往下滑超过一屏才出现「回到最新」，平时不显示。
+      if (toTop) toTop.hidden = top < Math.max(240, list.clientHeight);
+      if (top < 40 && floatLimit > FLOAT_PAGE) {
+        floatLimit = FLOAT_PAGE;
+        paintList(list);
+        return;
       }
-    });
+      if (top + list.clientHeight < list.scrollHeight - 48) return;
+      const total = visibleCards(settings.float_ca_only).length;
+      if (floatLimit <= total) {
+        floatLimit += FLOAT_PAGE;
+        paintList(list);
+      }
+      if (total < floatLimit && hasMore) requestSnapshot(true);
+    };
+    list.addEventListener(
+      "scroll",
+      () => {
+        if (!frame) frame = requestAnimationFrame(update);
+      },
+      { passive: true },
+    );
+    if (toTop) {
+      toTop.addEventListener("mousedown", (event) => event.stopPropagation());
+      toTop.addEventListener("click", () => list.scrollTo({ top: 0, behavior: "smooth" }));
+    }
   }
 
   function tokenStamp(card) {
@@ -544,28 +576,26 @@
       .join(",");
   }
 
-  function paintList(list, { gmgn, limit } = {}) {
+  function paintList(list) {
     if (!list || typeof WechatFeed === "undefined") return;
-    const rows = visibleCards(settings.float_ca_only);
-    const max = limit || 80;
-    const shown = rows.slice(0, max);
-    const starred = new Set(settings.starred_users || []);
-    const userRemarks = settings.user_remarks || {};
-    const groupRemarks = settings.group_remarks || {};
-    const fmt = typeof WechatFeed !== "undefined" && WechatFeed.numberFormat
-      ? WechatFeed.numberFormat()
-      : (settings.mcap_format || "cn");
-    const stamp = `${fmt}|` + shown
-      .map((card) => `${card.id}:${starred.has(card.senderUsername) ? 1 : 0}:${(settings.star_colors || {})[card.senderUsername] || ""}:${userRemarks[card.senderUsername] || ""}:${groupRemarks[card.conversationId] || ""}:${tokenStamp(card)}`)
-      .join("|");
-    if (list.dataset.wfStamp === stamp) return;
-    list.dataset.wfStamp = stamp;
+    const shown = visibleCards(settings.float_ca_only).slice(0, floatLimit);
     if (!shown.length) {
-      list.innerHTML = `<div class="empty">${cards.size ? "当前筛选下没有发言。" : "等待群里的新发言。"}</div>`;
+      const text = cards.size ? "当前筛选下没有发言。" : "等待群里的新发言。";
+      if (list.dataset.wfEmpty !== text) {
+        list.innerHTML = `<div class="empty">${text}</div>`;
+        list.dataset.wfEmpty = text;
+      }
       return;
     }
-    list.innerHTML = shown.map((card, index) => WechatFeed.gmgnCardHtml(present(card), WechatFeed.stackMeta(shown, index))).join("");
-    hydrate(list);
+    delete list.dataset.wfEmpty;
+    // 增量更新：一条消息/一次市值刷新只动那一张卡，其余节点和已解码的图片原样保留。
+    const created = WechatFeed.syncList(
+      list,
+      shown,
+      (card) => card.id,
+      (card, index) => WechatFeed.gmgnCardHtml(present(card), WechatFeed.stackMeta(shown, index)),
+    );
+    created.forEach((node) => hydrate(node));
     if (WechatFeed.startFreshTick) WechatFeed.startFreshTick(list);
   }
 
@@ -579,7 +609,7 @@
         ca.classList.toggle("on", Boolean(settings.float_ca_only));
       }
       syncGroupButton(floatHost);
-      paintList(list, { gmgn: false });
+      paintList(list);
     }
     if (overlayOn() && isFollowPage()) syncStream();
   }
@@ -603,7 +633,13 @@
       .gpick label { display:flex; gap:6px; align-items:center; min-height:26px; font-size:12px; cursor:pointer; }
       .gpick button { display:block; width:100%; text-align:left; height:28px; margin:0 0 4px; padding:0 8px; border:0; border-radius:8px; background:transparent; color:inherit; font:inherit; cursor:pointer; }
       .gpick button.on { background:#111827; color:#fff; }
-      .list { overflow:auto; overflow-x:hidden; padding:8px; display:flex; flex-direction:column; align-items:stretch; gap:0; min-height:0; min-width:0; flex:1 1 auto; }
+      .list { overflow:auto; overflow-x:hidden; overscroll-behavior:contain; padding:8px; display:flex; flex-direction:column; align-items:stretch; gap:0; min-height:0; min-width:0; flex:1 1 auto; }
+      /* 屏幕外的卡跳过布局与绘制：翻到几百条历史后，顶部插入新消息不必重排整列 */
+      .list > .wf-card { content-visibility:auto; contain-intrinsic-size:auto 120px; }
+      .totop { position:absolute; right:14px; bottom:30px; z-index:5; display:grid; place-items:center; width:34px; height:34px; padding:0; border:0; border-radius:50%; background:#111827; color:#fff; font:700 16px/1 sans-serif; box-shadow:0 6px 18px rgba(0,0,0,.28); cursor:pointer; opacity:.88; }
+      .totop:hover { opacity:1; }
+      .totop[hidden] { display:none; }
+      :host([data-theme="dark"]) .totop { background:#f2f4f7; color:#111827; }
       .chip { border:0; border-radius:999px; background:#111827; color:white; padding:8px 12px; box-shadow:0 8px 24px rgba(0,0,0,.2); cursor:pointer; }
       .resize { position:absolute; right:4px; bottom:4px; width:18px; height:18px; cursor:nwse-resize; border-right:3px solid #98a2b3; border-bottom:3px solid #98a2b3; opacity:.85; }
     </style>
@@ -625,6 +661,7 @@
         <div class="gpick-list"></div>
       </div>
       <div class="list"><div class="empty">等待群里的新发言。</div></div>
+      <button type="button" class="totop" data-totop hidden title="回到最新" aria-label="回到最新">↑</button>
       <div class="resize" data-resize></div>
     </section>`;
   }
@@ -863,7 +900,10 @@
     host._ca = ca;
     host._groups = shadow.querySelector("[data-groups]");
     host._gpick = shadow.querySelector(".gpick");
+    host._toTop = shadow.querySelector("[data-totop]");
+    floatLimit = FLOAT_PAGE;
     bindList(shadow, list);
+    bindFloatScroll(host, list);
     all.addEventListener("click", () => {
       settings.float_ca_only = false;
       if (host._gpick) host._gpick.hidden = true;
@@ -899,7 +939,7 @@
     });
     shadow.querySelector("[data-collapse]").addEventListener("click", collapse);
     syncGroupButton(host);
-    paintList(list, { gmgn: false });
+    paintList(list);
   }
 
   async function mountFloat() {
@@ -1021,8 +1061,14 @@
     const stamp = rows.map((card) => cardStamp(card)).join("|");
     if (host._stamp === stamp) return;
     host._stamp = stamp;
-    host._list.innerHTML = rows.map((card, index) => WechatFeed.gmgnCardHtml(present(card), WechatFeed.stackMeta(rows, index))).join("");
-    hydrate(host._list);
+    // 只换变了的卡：整段重建会让插入的高度抖动，gmgn 的虚拟列表跟着重新测量、跳位置。
+    const created = WechatFeed.syncList(
+      host._list,
+      rows,
+      (card) => card.id,
+      (card, index) => WechatFeed.gmgnCardHtml(present(card), WechatFeed.stackMeta(rows, index)),
+    );
+    created.forEach((node) => hydrate(node));
     if (WechatFeed.startFreshTick) WechatFeed.startFreshTick(host._list);
   }
 

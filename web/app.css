@@ -624,6 +624,29 @@ body {
 }
 .more[hidden] { display: none; }
 
+/* 往下滑超过一屏才出现，平时不显示 */
+.to-top {
+  position: fixed;
+  right: 24px;
+  bottom: 28px;
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: #111827;
+  color: #fff;
+  font: 700 20px/1 sans-serif;
+  box-shadow: 0 8px 22px rgba(16, 24, 40, 0.28);
+  cursor: pointer;
+  opacity: 0.88;
+}
+.to-top:hover { opacity: 1; }
+.to-top[hidden] { display: none; }
+
 .wf-avatar {
   position: relative;
   display: grid;

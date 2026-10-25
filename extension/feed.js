@@ -384,11 +384,11 @@
     return "";
   }
 
+  // 标记与时间无关，文字由 tickFresh 填：卡片 HTML 不随「刚刚 → 1分钟前」变化，增量渲染才能复用节点。
   function freshHtml(seconds) {
     const time = Number(seconds) || 0;
-    const label = formatFresh(time);
     if (!time) return "";
-    return `<span class="wf-fresh" data-fresh-at="${time}"${label ? "" : " hidden"}>${escapeText(label)}</span>`;
+    return `<span class="wf-fresh" data-fresh-at="${time}" hidden></span>`;
   }
 
   function tickFresh(root) {
@@ -401,9 +401,47 @@
     scan(root || document);
     for (const el of nodes) {
       const label = formatFresh(Number(el.dataset.freshAt));
-      el.textContent = label;
-      el.hidden = !label;
+      // 没变就不写，避免每 15 秒让整列表样式失效。
+      if (el.textContent !== label) el.textContent = label;
+      if (el.hidden !== !label) el.hidden = !label;
     }
+  }
+
+  // 按 key 增量更新列表：HTML 没变的节点原样保留（已解码的图片、hover、滚动锚定都不丢），
+  // 只替换变了的、插入新的、删掉没了的。返回新建的节点，调用方只需给它们补图片等。
+  function syncList(container, items, keyOf, htmlOf) {
+    const keys = items.map((item, index) => String(keyOf(item, index)));
+    const wanted = new Set(keys);
+    const existing = new Map();
+    for (const node of Array.from(container.children)) {
+      const key = node.__wfKey;
+      if (!key || !wanted.has(key) || existing.has(key)) node.remove();
+      else existing.set(key, node);
+    }
+    const created = [];
+    let cursor = container.firstElementChild;
+    items.forEach((item, index) => {
+      const key = keys[index];
+      const html = htmlOf(item, index);
+      let node = existing.get(key);
+      if (!node || node.__wfHtml !== html) {
+        const tpl = document.createElement("template");
+        tpl.innerHTML = html.trim();
+        const next = tpl.content.firstElementChild;
+        if (!next) return;
+        next.__wfKey = key;
+        next.__wfHtml = html;
+        if (node) {
+          if (cursor === node) cursor = next;
+          node.replaceWith(next);
+        }
+        node = next;
+        created.push(next);
+      }
+      if (node === cursor) cursor = cursor.nextElementSibling;
+      else container.insertBefore(node, cursor);
+    });
+    return created;
   }
 
   function startFreshTick(root) {
@@ -1282,6 +1320,7 @@
     formatFresh,
     tickFresh,
     startFreshTick,
+    syncList,
     hue,
     feedGroupIds,
     cardInFeed,

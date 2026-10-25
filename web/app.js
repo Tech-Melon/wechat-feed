@@ -585,22 +585,30 @@ function renderFeed() {
     more.hidden = true;
     return;
   }
-  feed.innerHTML = cards.map((card, index) => WechatFeed.cardHtml(present(card), WechatFeed.stackMeta(cards, index))).join("");
+  // 增量更新：新消息/市值刷新只动对应的卡，其余节点保留，往下看历史时内容不会被顶走。
+  const created = WechatFeed.syncList(
+    feed,
+    cards,
+    (card) => card.id,
+    (card, index) => WechatFeed.cardHtml(present(card), WechatFeed.stackMeta(cards, index)),
+  );
   if (window.WechatFeed.tickFresh) window.WechatFeed.tickFresh(feed);
   more.hidden = !state.hasMore;
   more.textContent = state.loadingMore ? "正在加载…" : "加载更早的消息…";
-  for (const img of feed.querySelectorAll(".wf-token-logo[src], .wf-token-hero[src]")) {
-    img.addEventListener("error", () => {
-      if (img.classList.contains("wf-token-logo")) {
-        const letter = document.createElement("span");
-        letter.className = "wf-token-logo wf-token-fallback";
-        const sym = img.closest(".wf-token")?.querySelector(".wf-token-title strong")?.textContent || "?";
-        letter.textContent = String(sym).replace("$", "").slice(0, 1) || "?";
-        img.replaceWith(letter);
-        return;
-      }
-      img.remove();
-    });
+  for (const node of created) {
+    for (const img of node.querySelectorAll(".wf-token-logo[src], .wf-token-hero[src]")) {
+      img.addEventListener("error", () => {
+        if (img.classList.contains("wf-token-logo")) {
+          const letter = document.createElement("span");
+          letter.className = "wf-token-logo wf-token-fallback";
+          const sym = img.closest(".wf-token")?.querySelector(".wf-token-title strong")?.textContent || "?";
+          letter.textContent = String(sym).replace("$", "").slice(0, 1) || "?";
+          img.replaceWith(letter);
+          return;
+        }
+        img.remove();
+      });
+    }
   }
 }
 
@@ -1777,6 +1785,22 @@ source.onmessage = (event) => {
     if ((payload.card.cas || payload.card.tokenCards || []).length) scheduleBoard();
   }
 };
+
+const toTop = document.querySelector("#to-top");
+let toTopFrame = 0;
+window.addEventListener(
+  "scroll",
+  () => {
+    if (toTopFrame) return;
+    toTopFrame = requestAnimationFrame(() => {
+      toTopFrame = 0;
+      // 往下滑超过一屏才出现「回到最新」。
+      toTop.hidden = window.scrollY < Math.max(600, window.innerHeight);
+    });
+  },
+  { passive: true },
+);
+toTop.addEventListener("click", () => window.scrollTo({ top: 0, behavior: "smooth" }));
 
 const sentinel = new IntersectionObserver((entries) => {
   if (entries.some((entry) => entry.isIntersecting)) {
