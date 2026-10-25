@@ -258,7 +258,8 @@ function blobToDataUrl(blob) {
 }
 
 const avatarMem = new Map();
-const AVATAR_TTL_MS = 24 * 3600 * 1000;
+// 和本地服务的头像缓存一致：3 天内直接用插件里的副本，不再向本地服务要。
+const AVATAR_TTL_MS = 3 * 24 * 3600 * 1000;
 
 async function proxyCached(url) {
   const mem = avatarMem.get(url);

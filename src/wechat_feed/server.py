@@ -49,8 +49,12 @@ from .wxemoji import (
 from .wximage import load_image, parse_ref, ref_for
 
 _AVATAR_USER = re.compile(r"^[A-Za-z0-9_@.\-]{1,80}$")
-_AVATAR_TTL = 24 * 3600
-_AVATAR_CACHE = "private, max-age=86400"
+# 头像落盘缓存 3 天，期间不再读微信库；浏览器和插件也按 3 天缓存。
+_AVATAR_TTL = 3 * 24 * 3600
+_AVATAR_CACHE = "private, max-age=259200"
+# 微信库里确实没有头像的人记一个标记，1 天内直接 404，不再每次查库、连 WDA。
+_AVATAR_MISS_TTL = 24 * 3600
+_AVATAR_MISS_CACHE = "private, max-age=3600"
 
 _LISTEN_HOST = "127.0.0.1"
 _LISTEN_PORT = 8765
@@ -439,18 +443,32 @@ def create_app() -> FastAPI:
             "stored": stored,
         }
 
-    def _avatar_files(ident: str) -> tuple[Path, Path]:
+    def _avatar_files(ident: str) -> tuple[Path, Path, Path]:
         folder = data_dir() / "avatars"
         folder.mkdir(parents=True, exist_ok=True)
         safe = ident.replace("/", "_").replace("\\", "_")
-        return folder / f"{safe}.bin", folder / f"{safe}.mime"
+        return folder / f"{safe}.bin", folder / f"{safe}.mime", folder / f"{safe}.miss"
+
+    def _fresh(path: Path, ttl: int) -> bool:
+        try:
+            return time.time() - path.stat().st_mtime < ttl
+        except OSError:
+            return False
+
+    def _save_avatar(blob_path: Path, mime_path: Path, miss_path: Path, blob: bytes, mime: str):
+        blob_path.write_bytes(blob)
+        mime_path.write_text(mime, encoding="utf-8")
+        miss_path.unlink(missing_ok=True)
 
     @app.get("/api/avatar")
     async def avatar(username: str) -> Response:
         ident = str(username or "").strip()
         if not _AVATAR_USER.match(ident):
             raise HTTPException(status_code=400, detail="用户名不合法")
-        blob_path, mime_path = _avatar_files(ident)
+        blob_path, mime_path, miss_path = _avatar_files(ident)
+        missing = HTTPException(
+            status_code=404, detail="没有头像", headers={"Cache-Control": _AVATAR_MISS_CACHE}
+        )
 
         def cached_response() -> Response | None:
             if not blob_path.exists():
@@ -465,8 +483,16 @@ def create_app() -> FastAPI:
             )
 
         cached = cached_response()
-        if cached and time.time() - blob_path.stat().st_mtime < _AVATAR_TTL:
+        if cached and _fresh(blob_path, _AVATAR_TTL):
             return cached
+        if cached is None and _fresh(miss_path, _AVATAR_MISS_TTL):
+            raise missing
+
+        def keep_stale() -> Response:
+            # 刷新失败就继续用旧图，并把缓存时间往后顺延，不让每次请求都重新查库、连 WDA。
+            os.utime(blob_path)
+            return cached
+
         settings = store.get()
         reader = await direct.reader(str(settings["upstream_base"]))
         if reader is not None:
@@ -477,8 +503,7 @@ def create_app() -> FastAPI:
                 blob = None
             if blob:
                 media_type = "image/png" if blob[:4] == b"\x89PNG" else "image/jpeg"
-                blob_path.write_bytes(blob)
-                mime_path.write_text(media_type, encoding="utf-8")
+                _save_avatar(blob_path, mime_path, miss_path, blob, media_type)
                 return Response(
                     content=blob,
                     media_type=media_type,
@@ -491,16 +516,20 @@ def create_app() -> FastAPI:
             )
         except Exception as exc:
             if cached is not None:
-                return cached
+                return keep_stale()
+            if reader is not None:
+                # 直读可用、库里没有这个人的头像、WDA 也没开：记为没有头像。
+                miss_path.touch()
+                raise missing from exc
             logger.info("头像读取失败: {}", type(exc).__name__)
             raise HTTPException(status_code=502, detail="头像读不到") from exc
         content_type = str(response.headers.get("content-type") or "")
         if response.status_code != 200 or not content_type.startswith("image/"):
             if cached is not None:
-                return cached
-            raise HTTPException(status_code=404, detail="没有头像")
-        blob_path.write_bytes(response.content)
-        mime_path.write_text(content_type, encoding="utf-8")
+                return keep_stale()
+            miss_path.touch()
+            raise missing
+        _save_avatar(blob_path, mime_path, miss_path, response.content, content_type)
         return Response(
             content=response.content,
             media_type=content_type,

@@ -1614,8 +1614,9 @@ def test_package_omits_local_data_and_api_key() -> None:
     assert "AVATAR_TTL_MS" in background
     assert "wf-avatar-v2" in background
     server = (ROOT / "src" / "wechat_feed" / "server.py").read_text(encoding="utf-8")
-    assert "_AVATAR_TTL = 24 * 3600" in server
-    assert "max-age=86400" in server
+    assert "_AVATAR_TTL = 3 * 24 * 3600" in server
+    assert "max-age=259200" in server
+    assert "AVATAR_TTL_MS = 3 * 24 * 3600 * 1000" in background
     app_js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
     assert "await reloadFeeds()" in app_js
     assert "function setListenUsers" in app_js

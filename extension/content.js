@@ -633,7 +633,9 @@
       .gpick label { display:flex; gap:6px; align-items:center; min-height:26px; font-size:12px; cursor:pointer; }
       .gpick button { display:block; width:100%; text-align:left; height:28px; margin:0 0 4px; padding:0 8px; border:0; border-radius:8px; background:transparent; color:inherit; font:inherit; cursor:pointer; }
       .gpick button.on { background:#111827; color:#fff; }
-      .list { overflow:auto; overflow-x:hidden; overscroll-behavior:contain; padding:8px; display:flex; flex-direction:column; align-items:stretch; gap:0; min-height:0; min-width:0; flex:1 1 auto; }
+      /* 背景必须不透明：1 倍屏上 Chrome 不给透明背景的滚动容器做合成线程滚动，
+         每帧都要主线程重绘，宿主页面（gmgn）一忙就卡。网页版是整页滚动，没有这个问题。 */
+      .list { background:var(--card); overflow:auto; overflow-x:hidden; overscroll-behavior:contain; padding:8px; display:flex; flex-direction:column; align-items:stretch; gap:0; min-height:0; min-width:0; flex:1 1 auto; }
       /* 屏幕外的卡跳过布局与绘制：翻到几百条历史后，顶部插入新消息不必重排整列 */
       .list > .wf-card { content-visibility:auto; contain-intrinsic-size:auto 120px; }
       .totop { position:absolute; right:14px; bottom:30px; z-index:5; display:grid; place-items:center; width:34px; height:34px; padding:0; border:0; border-radius:50%; background:#111827; color:#fff; font:700 16px/1 sans-serif; box-shadow:0 6px 18px rgba(0,0,0,.28); cursor:pointer; opacity:.88; }
