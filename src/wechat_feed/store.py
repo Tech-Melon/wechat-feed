@@ -35,6 +35,14 @@ class CardStore:
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_cards_conv_time ON cards(conversation_id, create_time)"
         )
+        # 翻页游标按 (create_time, received_at[, id]) 行值比较，配复合索引才能免排序、免 OR 拆分。
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_cards_time_recv ON cards(create_time, received_at)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_cards_conv_cursor "
+            "ON cards(conversation_id, create_time, received_at, id)"
+        )
         self._conn.commit()
 
     def cutoff(self) -> int:
@@ -199,8 +207,9 @@ class CardStore:
         args: list[Any] = [cutoff]
         if before:
             if before_received:
-                sql += " AND (create_time < ? OR (create_time = ? AND received_at < ?))"
-                args.extend([int(before), int(before), int(before_received)])
+                # 行值比较能直接走 idx_cards_time_recv；OR 写法会被拆成 MULTI-INDEX OR + 临时排序。
+                sql += " AND (create_time, received_at) < (?, ?)"
+                args.extend([int(before), int(before_received)])
             else:
                 sql += " AND create_time < ?"
                 args.append(int(before))
@@ -329,29 +338,25 @@ class CardStore:
         if sender:
             sender_sql = "AND json_extract(payload, '$.senderUsername') = ? "
             extra = [sender]
+        # 行值游标配 idx_cards_conv_cursor，按索引顺序取，不再做临时排序。
         if newer:
             sql = (
                 "SELECT payload FROM cards WHERE conversation_id = ? AND create_time >= ? "
                 f"{sender_sql}"
-                "AND (create_time > ? OR (create_time = ? AND received_at > ?) "
-                "OR (create_time = ? AND received_at = ? AND id > ?)) "
+                "AND (create_time, received_at, id) > (?, ?, ?) "
                 "ORDER BY create_time ASC, received_at ASC, id ASC LIMIT ?"
             )
         else:
             sql = (
                 "SELECT payload FROM cards WHERE conversation_id = ? AND create_time >= ? "
                 f"{sender_sql}"
-                "AND (create_time < ? OR (create_time = ? AND received_at < ?) "
-                "OR (create_time = ? AND received_at = ? AND id < ?)) "
+                "AND (create_time, received_at, id) < (?, ?, ?) "
                 "ORDER BY create_time DESC, received_at DESC, id DESC LIMIT ?"
             )
         args: list[Any] = [
             conversation_id,
             cutoff,
             *extra,
-            int(create_time),
-            int(create_time),
-            int(received_at),
             int(create_time),
             int(received_at),
             str(card_id),
@@ -399,16 +404,12 @@ class CardStore:
             sender=sender,
         )
         before = [
-            self.slim_context(item)
-            for item in older
-            if str(item.get("id") or "") != card_id
+            self.slim_context(item) for item in older if str(item.get("id") or "") != card_id
         ][:size]
         before.reverse()
-        after = [
-            self.slim_context(item)
-            for item in newer
-            if str(item.get("id") or "") != card_id
-        ][:size]
+        after = [self.slim_context(item) for item in newer if str(item.get("id") or "") != card_id][
+            :size
+        ]
         return before, after
 
     def earlier_ca_cards(self, card: dict[str, Any], *, limit: int = 8) -> list[dict[str, Any]]:

@@ -1453,9 +1453,10 @@ async function load() {
   state.runtime = health.runtime || state.runtime;
   applyFolds();
   render();
+  // 榜单不依赖信息流，和首屏一起发，不用等首屏返回。
+  loadBoard().catch(() => {});
   await loadFeed({ reset: true, caOnly: Boolean(state.settings.ca_only) });
   loadFeed({ reset: true, caOnly: !state.settings.ca_only }).catch(() => {});
-  loadBoard().catch(() => {});
   if (window.WechatFeed.startFreshTick) window.WechatFeed.startFreshTick(document);
 }
 

@@ -405,21 +405,27 @@ def create_app() -> FastAPI:
         allowed = None
         if not conversation_id and not include_all_groups:
             allowed = display_group_ids(settings, ca_only=ca_only) or None
-        cards, has_more = persist.page(
-            limit=limit,
-            before=before,
-            before_received=before_received,
-            conversation_id=conversation_id or None,
-            blocked=blocked,
-            allowed=allowed,
-            ca_only=ca_only,
-            senders_by_group=senders or None,
-            blocked_senders=blocked_senders or None,
-        )
-        shown = [apply_display(dict(card), settings) for card in cards]
-        for card in shown:
-            persist.fill_context(card)
-            cas.decorate_card(card)
+
+        def build() -> tuple[list[dict[str, Any]], bool, int]:
+            cards, more = persist.page(
+                limit=limit,
+                before=before,
+                before_received=before_received,
+                conversation_id=conversation_id or None,
+                blocked=blocked,
+                allowed=allowed,
+                ca_only=ca_only,
+                senders_by_group=senders or None,
+                blocked_senders=blocked_senders or None,
+            )
+            out = [apply_display(dict(card), settings) for card in cards]
+            for card in out:
+                persist.fill_context(card)
+                cas.decorate_card(card)
+            return out, more, persist.count()
+
+        # 查库和组装都是同步的，放线程里跑，避免慢查询卡住事件循环（榜单、头像、SSE 会一起排队）。
+        shown, has_more, stored = await asyncio.to_thread(build)
         pending = 0
         for card in shown:
             if pending >= 12:
@@ -430,7 +436,7 @@ def create_app() -> FastAPI:
         return {
             "messages": shown,
             "has_more": has_more,
-            "stored": persist.count(),
+            "stored": stored,
         }
 
     def _avatar_files(ident: str) -> tuple[Path, Path]:
