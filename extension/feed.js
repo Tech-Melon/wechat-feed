@@ -1484,6 +1484,14 @@
     return `<span class="wf-token-logo wf-token-fallback rc-logo" ${dim}>${escapeText(letter)}</span>`;
   }
 
+  // 顶部条最左边：这条 CA 所在链的图标；识别不出链时退回红色「新」。
+  function recentChainHtml(chain) {
+    const icon = chainIcon(chain);
+    if (!icon) return `<span class="rc-tag">新</span>`;
+    const meta = chainMeta(chain);
+    return `<span class="rc-chain" title="${escapeText(meta ? meta.label : String(chain))}">${icon}</span>`;
+  }
+
   function clockText(seconds) {
     return formatTime(seconds).split(":").slice(0, 2).join(":");
   }
@@ -1495,7 +1503,7 @@
     const name = card.displayName || card.senderName || "群成员";
     const cap = moneyHtml(token.marketCap, token.marketCapText || "");
     return `<div class="rc-tick" data-recent-open title="最新 CA · 点开看最近 10 条">
-      <span class="rc-tag">新</span>
+      ${recentChainHtml(entry.chain)}
       ${recentLogo(entry, 18)}
       <strong class="rc-sym">${escapeText(recentSymbol(entry))}</strong>
       ${cap ? `<span class="rc-cap is-${mcapTone(token.marketCap)}">${cap}</span>` : ""}

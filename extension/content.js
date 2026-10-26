@@ -672,6 +672,9 @@
       .rc-tick.is-new { animation:rc-flash 1.6s ease-out 1; }
       @keyframes rc-flash { 0%,30% { background:color-mix(in srgb, #e5484d 30%, var(--card)); } 100% { background:color-mix(in srgb, #e5484d 6%, var(--card)); } }
       .rc-tag { flex:none; display:grid; place-items:center; width:18px; height:18px; border-radius:5px; background:#e5484d; color:#fff; font-size:11px; font-weight:800; line-height:1; }
+      .rc-chain { flex:none; display:grid; place-items:center; width:20px; height:20px; border-radius:6px; background:var(--card); box-shadow:0 0 0 1px var(--line); }
+      .rc-chain .wf-chain-ico { width:16px; height:16px; border-radius:4px; }
+      .rc-chain:empty { display:none; }
       .rc-logo { flex:none; display:grid; place-items:center; object-fit:cover; line-height:1; }
       .rc-sym { flex:none; max-width:84px; overflow:hidden; text-overflow:ellipsis; font-weight:800; font-size:13px; }
       .rc-cap { flex:none; font-weight:800; }
