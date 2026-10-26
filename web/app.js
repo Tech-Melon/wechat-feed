@@ -1061,7 +1061,12 @@ function renderUserPage(userId) {
   box.innerHTML = head + calls.map((item) => {
     const symbol = item.symbol ? `$${esc(item.symbol)}` : esc(item.address.slice(0, 8));
     const status = callStatus(item);
-    const win = status === "win"
+    const excludedTip = item.excluded === "bigcap"
+      ? "喊单时市值 ≥ 3000 万美元，多是在聊已经起来的币，不计入榜单和胜率"
+      : "识别不出代币或所在链，不计入榜单和胜率";
+    const win = status === "excluded"
+      ? `<span class="ca-pill" title="${excludedTip}"><span class="ca-k">结果</span><b>不计入</b></span>`
+      : status === "win"
       ? `<span class="ca-pill win" title="喊单后最高 ≥ 该用户首次喊单市值的 1.5 倍（涨幅 50%）"><span class="ca-k">结果</span><b>胜</b></span>`
       : status === "pending"
         ? `<span class="ca-pill" title="喊单不满 ${pendingHours()} 小时、还没到 1.5 倍，暂不计入胜率"><span class="ca-k">结果</span><b>待定</b></span>`
@@ -1097,7 +1102,7 @@ function renderBoardPage() {
   const starred = new Set(state.settings.starred_users || []);
   title.textContent = "CA 发现榜";
   const esc = window.WechatFeed.escapeText;
-  const rule = `<span class="ca-win-rule" title="相对该用户自己第一次喊到这个 CA 时的市值；喊单不满 ${pendingHours()} 小时且还没到的记为待定">胜：喊单后最高 ≥ 1.5 倍（涨幅 50%）</span>`;
+  const rule = `<span class="ca-win-rule" title="相对该用户自己第一次喊到这个 CA 时的市值；喊单不满 ${pendingHours()} 小时且还没到的记为待定；喊单市值 ≥ 3000 万美元或识别不出代币 / 链的单不计入">胜：喊单后最高 ≥ 1.5 倍（涨幅 50%）</span>`;
   const dormant = stats.dormant
     ? ` · <span title="超过 24 小时没人再喊、现市值不到 ${esc(moneyText(stats.dormantMcap || 15000))} 的暂停刷新，再被喊到自动恢复">${stats.dormant} 个休眠</span>`
     : "";

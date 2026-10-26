@@ -775,7 +775,7 @@ def test_board_pending_cap_and_range(tmp_path: Path) -> None:
     for index, (user, addr, at, mcap, peak) in enumerate(rows):
         store.remember(
             _call_card(f"p{index}", user, at),
-            [{"address": addr, "chain": "bsc", "marketCap": mcap}],
+            [{"address": addr, "chain": "bsc", "symbol": "T", "marketCap": mcap}],
         )
         store._conn.execute("UPDATE ca_calls SET ath_mcap = ? WHERE address = ?", (peak, addr))
     store._conn.commit()
@@ -795,7 +795,7 @@ def test_board_pending_cap_and_range(tmp_path: Path) -> None:
     only_pending = CaStore(tmp_path / "p.db")
     only_pending.remember(
         _call_card("q", "wxid_q", now - 60),
-        [{"address": "0x" + "b1" * 20, "chain": "bsc", "marketCap": 1000}],
+        [{"address": "0x" + "b1" * 20, "chain": "bsc", "symbol": "T", "marketCap": 1000}],
     )
     solo = only_pending.board(now=now)[0]
     assert solo["winRateText"] == "待定"
@@ -1763,13 +1763,13 @@ def test_ca_store_heals_lowercased_solana_rows(tmp_path: Path) -> None:
         "conversationId": "12345678@chatroom",
         "createTime": 1_800_000_000,
     }
-    store.remember(card, [{"address": sol, "chain": "sol", "marketCap": 1000}])
+    store.remember(card, [{"address": sol, "chain": "sol", "symbol": "T", "marketCap": 1000}])
     for table in ("ca_tokens", "ca_calls", "ca_group_firsts"):
         store._conn.execute(f"UPDATE {table} SET address = lower(address)")
     store._conn.commit()
     store.remember(
         {**card, "id": "h2", "createTime": 1_800_000_500},
-        [{"address": sol, "chain": "sol", "marketCap": 2000}],
+        [{"address": sol, "chain": "sol", "symbol": "T", "marketCap": 2000}],
     )
     for table in ("ca_tokens", "ca_calls", "ca_group_firsts"):
         rows = [r[0] for r in store._conn.execute(f"SELECT address FROM {table}")]
@@ -1918,15 +1918,17 @@ def test_ca_store_purge_period_survives_reimport(tmp_path: Path) -> None:
     t_keep = 1_800_000_000
     t_drop = t_keep + 40 * 86400
     store.remember(
-        _call_card("k", "wxid_k", t_keep), [{"address": keep, "chain": "bsc", "marketCap": 1000}]
+        _call_card("k", "wxid_k", t_keep),
+        [{"address": keep, "chain": "bsc", "symbol": "T", "marketCap": 1000}],
     )
     store.remember(
-        _call_card("d", "wxid_d", t_drop), [{"address": drop, "chain": "bsc", "marketCap": 1000}]
+        _call_card("d", "wxid_d", t_drop),
+        [{"address": drop, "chain": "bsc", "symbol": "T", "marketCap": 1000}],
     )
     # 老币在删除段内又被喊过一次：只删那条喊单，币保留。
     store.remember(
         _call_card("k2", "wxid_x", t_drop + 60),
-        [{"address": keep, "chain": "bsc", "marketCap": 1200}],
+        [{"address": keep, "chain": "bsc", "symbol": "T", "marketCap": 1200}],
     )
     preview = store.purge(t_drop - 10, t_drop + 3600, dry_run=True)
     assert preview == {"calls": 2, "groupFirsts": 1, "tokens": 1}
@@ -1937,7 +1939,8 @@ def test_ca_store_purge_period_survives_reimport(tmp_path: Path) -> None:
     assert [r["userId"] for r in store.board(now=t_drop + 7200)] == ["wxid_k"]
     # 启动时从 feed.db 回灌同一张卡片，被删的那段不会写回来。
     store.remember(
-        _call_card("d", "wxid_d", t_drop), [{"address": drop, "chain": "bsc", "marketCap": 1000}]
+        _call_card("d", "wxid_d", t_drop),
+        [{"address": drop, "chain": "bsc", "symbol": "T", "marketCap": 1000}],
     )
     assert store._count("SELECT COUNT(*) FROM ca_calls WHERE called_at = ?", (t_drop,)) == 0
     summary = store.data_summary()
@@ -2142,13 +2145,13 @@ def test_board_cache_invalidates_on_write(tmp_path: Path) -> None:
     at = int(time.time()) - 86400
     store.remember(
         _call_card("c1", "wxid_a", at),
-        [{"address": "0x" + "a7" * 20, "chain": "bsc", "marketCap": 1000}],
+        [{"address": "0x" + "a7" * 20, "chain": "bsc", "symbol": "T", "marketCap": 1000}],
     )
     first = store.board()
     assert store.board() is first  # 命中缓存
     store.remember(
         _call_card("c2", "wxid_b", at),
-        [{"address": "0x" + "a8" * 20, "chain": "bsc", "marketCap": 1000}],
+        [{"address": "0x" + "a8" * 20, "chain": "bsc", "symbol": "T", "marketCap": 1000}],
     )
     second = store.board()
     assert second is not first
@@ -2181,3 +2184,32 @@ def test_board_push_is_throttled() -> None:
     events = asyncio.run(run())
     # 20 次变化：立即推 1 次，节流期结束补 1 次。
     assert [e["type"] for e in events] == ["ca-board", "ca-board"]
+
+
+def test_board_skips_big_cap_and_unknown_tokens(tmp_path: Path) -> None:
+    # 喊单市值 ≥ 3000 万、识别不出代币 / 链的单不计入榜单和胜率；详情页仍列出并标原因。
+    from wechat_feed.castore import RANK_MAX_MCAP, call_excluded
+
+    assert call_excluded(RANK_MAX_MCAP - 1, "PEPE", "bsc") == ""
+    assert call_excluded(RANK_MAX_MCAP, "PEPE", "bsc") == "bigcap"
+    assert call_excluded(1000, "", "bsc") == "unknown"
+    assert call_excluded(1000, "PEPE", "_") == "unknown"
+    store = CaStore(tmp_path / "ca.db")
+    at = int(__import__("time").time()) - 86400
+    rows = [
+        ("s1", "0x" + "11" * 20, "SMALL", 50_000),
+        ("s2", "0x" + "22" * 20, "BIG", 50_000_000),
+        ("s3", "0x" + "33" * 20, "", 60_000),
+    ]
+    for card, addr, symbol, mcap in rows:
+        token = {"address": addr, "chain": "bsc", "marketCap": mcap}
+        if symbol:
+            token["symbol"] = symbol
+        store.remember(_call_card(card, "wxid_z", at), [token])
+    board = {row["userId"]: row for row in store.board()}
+    assert board["wxid_z"]["calls"] == 1
+    calls = {item["symbol"] or "?": item for item in store.user_calls("wxid_z")}
+    assert calls["SMALL"]["excluded"] == ""
+    assert calls["BIG"]["status"] == "excluded" and calls["BIG"]["excluded"] == "bigcap"
+    assert calls["?"]["excluded"] == "unknown" and not calls["?"]["win"]
+    assert store.caller_stats_map(fresh=True)["wxid_z"]["calls"] == 1

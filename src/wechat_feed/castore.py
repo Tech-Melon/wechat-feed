@@ -14,6 +14,10 @@ from .tokens import peak_since
 
 KEEP_SECONDS = 365 * 24 * 3600
 WIN_X = 1.5
+# 喊单时市值达到 3000 万美元的不计入榜单和胜率：这个量级多是在聊已经起来的币，
+# 再涨 50% 要几千万美元资金进场，和早期喊单不是一回事。按喊单时的市值算，
+# 喊在低位、后来涨上去的单照常计入。
+RANK_MAX_MCAP = 30_000_000.0
 # 超过一万倍当脏数据：历史回灌、错市值、单位错位都会出这种数。
 MAX_X = 10_000.0
 # 刷新分层按「最后一次被喊」算：热 6 小时内、温 3 天内、其余为冷。
@@ -102,6 +106,15 @@ def is_sane(first_mcap: float, ath_mcap: float = 0.0, last_mcap: float = 0.0) ->
         return False
     peak = max(_num(ath_mcap), _num(last_mcap), first)
     return peak / first <= MAX_X
+
+
+def call_excluded(call_mcap: float, symbol: Any, chain: Any) -> str:
+    """不计入榜单与胜率的原因：unknown（识别不出代币或链）、bigcap（喊单市值过大）；计入返回空串。"""
+    if not _text(symbol) or _text(chain) in ("", "_"):
+        return "unknown"
+    if _num(call_mcap) >= RANK_MAX_MCAP:
+        return "bigcap"
+    return ""
 
 
 def _multiple(peak: float, base: float) -> float:
@@ -842,6 +855,8 @@ class CaStore:
             if not is_sane(first, last, last):
                 continue
             call_mcap = _num(row["mcap"])
+            if call_excluded(call_mcap, row["symbol"], row["chain"]):
+                continue
             # 榜用喊单后的 K 线高点；还没刷到 K 线时用现市值，不用 GMGN 历史总 ATH。
             call_ath = _num(row["call_ath"] if "call_ath" in row.keys() else 0)
             peak = max(call_ath, last, call_mcap)
@@ -908,9 +923,9 @@ class CaStore:
 
     def _call_join_sql(self) -> str:
         return """
-            SELECT c.caller_id, c.caller_name, c.mcap, c.called_at,
+            SELECT c.caller_id, c.caller_name, c.mcap, c.called_at, c.chain,
                    COALESCE(NULLIF(c.ath_mcap, 0), t.last_mcap) AS call_ath,
-                   t.last_mcap, t.first_mcap
+                   t.last_mcap, t.first_mcap, t.symbol
             FROM ca_calls c
             JOIN ca_tokens t ON t.chain = c.chain AND t.address = c.address
             WHERE c.called_at >= ?
@@ -975,6 +990,11 @@ class CaStore:
             now_x = (last / call_mcap) if call_mcap > 0 and last > 0 else 0.0
             if max_x > MAX_X or now_x > MAX_X:
                 continue
+            # 不计入的单照样列出来，标上原因，详情页能看到为什么没算进胜率。
+            excluded = call_excluded(call_mcap, row["symbol"], row["chain"])
+            status = (
+                "excluded" if excluded else call_status(max_x, int(row["called_at"] or 0), stamp)
+            )
             out.append(
                 {
                     "chain": _text(row["chain"]),
@@ -991,8 +1011,9 @@ class CaStore:
                     "maxX": max_x,
                     "nowXText": format_x(now_x),
                     "maxXText": format_x(max_x),
-                    "win": max_x >= WIN_X,
-                    "status": call_status(max_x, int(row["called_at"] or 0), stamp),
+                    "win": not excluded and max_x >= WIN_X,
+                    "status": status,
+                    "excluded": excluded,
                     "isFirst": _text(row["discoverer_id"]) == ident,
                     "groupId": _text(row["group_id"]),
                     "groupName": _text(row["group_name"]),
@@ -1078,8 +1099,10 @@ class CaStore:
             "rank": 0,
         }
         if not stats and calls:
+            counted = [item for item in calls if not item.get("excluded")]
+            user["calls"] = len(counted)
             wins = int(user["wins"])
-            n = len(calls)
+            n = len(counted)
             user["winRate"] = wins / n if n else 0.0
             user["winRateText"] = f"{user['winRate'] * 100:.0f}%"
         return {"user": user, "calls": calls}
