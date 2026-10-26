@@ -602,7 +602,44 @@
     return `${Number(number.toFixed(2))}x`;
   }
 
-  function tokenHtml(token) {
+  // 喊单人战绩：胜率（已结算里喊单后最高 ≥1.5 倍的比例）+ 总喊单数，前 10 名带名次。
+  function callerStatsHtml(stats, short) {
+    if (!stats || !Number(stats.calls)) {
+      return short ? "" : `<span class="wf-cs is-none" title="排行榜里还没有他的有效喊单">暂无战绩</span>`;
+    }
+    const calls = Number(stats.calls) || 0;
+    const settled = Number(stats.settled) || 0;
+    const wins = Number(stats.wins) || 0;
+    const pending = Number(stats.pending) || 0;
+    const rate = settled ? Math.round((Number(stats.winRate) || 0) * 100) : null;
+    const tone = rate === null ? "is-wait" : rate >= 60 ? "is-good" : rate >= 40 ? "is-mid" : "is-bad";
+    const avg = formatX(stats.avgX);
+    const rank = Number(stats.rank) || 0;
+    const title = [
+      `共喊 ${calls} 单`,
+      `已结算 ${settled}，胜 ${wins}`,
+      pending ? `待定 ${pending}` : "",
+      avg ? `均倍 ${avg}` : "",
+      rank ? `排行第 ${rank}` : "",
+    ].filter(Boolean).join(" · ") + "（胜 = 喊单后最高 ≥ 1.5 倍）";
+    const rateText = rate === null ? "待定" : `${rate}%`;
+    const badge = rank && rank <= 10 ? `<i class="wf-cs-rank">No.${rank}</i>` : "";
+    return `<span class="wf-cs ${tone}" title="${escapeText(title)}">${badge}<b>${short ? rateText : `胜率 ${rateText}`}</b><span>${calls}单</span></span>`;
+  }
+
+  function callerRowHtml(token, card) {
+    if (!card || !card.senderUsername || !("firstMcap" in token)) return "";
+    const name = card.displayName || card.senderName || "群成员";
+    const userId = card.senderUsername;
+    return `<div class="wf-caller">
+      <span class="wf-caller-k">喊单人</span>
+      <div class="wf-avatar wf-caller-av" style="background:hsl(${hue(userId)} 62% 46%)">${card.avatarUrl ? lazyImg(card.avatarUrl, "") : ""}<span>${escapeText(initial(name))}</span></div>
+      <button type="button" class="wf-discover-name" data-ca-user="${escapeText(userId)}" title="看 ${escapeText(name)} 的全部喊单">${escapeText(clipText(name, NAME_MAX))}</button>
+      ${callerStatsHtml(token.callerStats)}
+    </div>`;
+  }
+
+  function tokenHtml(token, card) {
     const isWallet = token.kind === "wallet" || token.source === "gmgn-wallet";
     const headLogo = token.logo
       ? `<img class="wf-token-logo" src="${escapeText(token.logo)}" data-wf-src="${escapeText(token.logo)}" alt="" />`
@@ -664,7 +701,7 @@
     const xbar = (nowX || maxX || showGroupX)
       ? `<div class="wf-xbar">${xrow("所有群", nowX, maxX, "自所有群首发之后的最高")}${showGroupX ? xrow("本群", groupNowX, groupMaxX, "自本群首发之后的最高") : ""}</div>`
       : "";
-    const foundBlock = (kind, name, userId, group, capHtml, when) => {
+    const foundBlock = (kind, name, userId, group, capHtml, when, stats) => {
       if (!name && !group) return "";
       const av = userId
         ? `<div class="wf-avatar wf-discover-av" style="background:hsl(${hue(userId)} 62% 46%)">${lazyImg(assetUrl(`/api/avatar?username=${encodeURIComponent(userId)}`), "")}<span>${escapeText(initial(name))}</span></div>`
@@ -678,6 +715,7 @@
              <span class="wf-discover-k">${escapeText(kind)}</span>
              <div class="wf-discover-line">
                ${who}
+               ${userId ? callerStatsHtml(stats, true) : ""}
                ${group ? `<span class="wf-discover-g">${escapeText(group)}</span>` : ""}
              </div>
              <div class="wf-discover-meta">${capHtml ? `发现市值 ${capHtml}` : ""}${when ? `${capHtml ? " · " : ""}${when}` : ""}</div>
@@ -688,10 +726,10 @@
     const groupWhen = token.groupFoundAt ? escapeText(formatCreated(token.groupFoundAt) || formatTime(token.groupFoundAt)) : "";
     const discover = isWallet ? "" : [
       (!token.isFirstCall && (token.foundBy || token.foundGroup))
-        ? foundBlock("所有群首发", token.foundBy || token.foundById, token.foundById, token.foundGroup, firstCap, foundWhen)
+        ? foundBlock("所有群首发", token.foundBy || token.foundById, token.foundById, token.foundGroup, firstCap, foundWhen, token.foundByStats)
         : "",
       (!token.isGroupFirst && !token.sameGroupAsGlobal && (token.groupFoundBy || token.groupFoundGroup))
-        ? foundBlock("本群首发", token.groupFoundBy || token.groupFoundById, token.groupFoundById, token.groupFoundGroup, groupFirstCap, groupWhen)
+        ? foundBlock("本群首发", token.groupFoundBy || token.groupFoundById, token.groupFoundById, token.groupFoundGroup, groupFirstCap, groupWhen, token.groupFoundByStats)
         : "",
     ].join("");
     const note = token.note ? `<div class="wf-wallet-note">${escapeText(token.note)}</div>` : "";
@@ -735,6 +773,7 @@
         </div>
       </div>
       ${note}
+      ${isWallet ? "" : callerRowHtml(token, card)}
       ${metrics}
       ${discover}
       ${links}
@@ -844,7 +883,7 @@
     const quote = quoteBlock(card, known, chains);
     const reply = card.quoteName ? `<div class="wf-reply">回复 ${escapeText(card.quoteName)}</div>` : "";
     const tokenStrip = tokens.length
-      ? `<div class="wf-tokens">${tokens.map(tokenHtml).join("")}</div>`
+      ? `<div class="wf-tokens">${tokens.map((token) => tokenHtml(token, card)).join("")}</div>`
       : (card.addresses || []).length
         ? `<div class="wf-tokens">${card.addresses.map(rawAddressHtml).join("")}</div>`
         : "";
@@ -1154,6 +1193,24 @@
       .wf-discover-line strong { font-size:14px; }
       .wf-discover-g { padding:1px 8px; border-radius:999px; background:#e8f1ff; color:#175cd3; font-size:12px; font-weight:700; }
       .wf-discover-meta { color:#667085; font-size:12px; margin-top:2px; }
+      .wf-caller { display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin-top:8px; min-width:0; }
+      .wf-caller-k { color:#667085; font-size:11px; font-weight:800; letter-spacing:.06em; }
+      .wf-caller-av { width:20px; height:20px; font-size:10px; }
+      .wf-caller .wf-discover-name { font-size:13px; max-width:9em; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+      .wf-cs { display:inline-flex; align-items:center; gap:4px; height:20px; padding:0 7px; border-radius:999px; font-size:11.5px; line-height:20px; white-space:nowrap; flex:none; cursor:help; background:#f2f4f7; color:#475467; }
+      .wf-cs b { font-weight:800; }
+      .wf-cs span { opacity:.75; font-weight:600; }
+      .wf-cs.is-good { background:#dcfae6; color:#067647; }
+      .wf-cs.is-mid { background:#fef0c7; color:#b54708; }
+      .wf-cs.is-bad { background:#fee4e2; color:#b42318; }
+      .wf-cs.is-none { color:#98a2b3; font-weight:600; }
+      .wf-cs-rank { font-style:normal; font-weight:800; font-size:10.5px; padding:0 4px; border-radius:4px; background:linear-gradient(90deg,#f59e0b,#f97316); color:#fff; line-height:15px; }
+      :host([data-theme="dark"]) .wf-caller-k { color:#98a2b3; }
+      :host([data-theme="dark"]) .wf-cs { background:rgba(255,255,255,.08); color:#d0d5dd; }
+      :host([data-theme="dark"]) .wf-cs.is-good { background:rgba(18,183,106,.18); color:#75e0a7; }
+      :host([data-theme="dark"]) .wf-cs.is-mid { background:rgba(247,144,9,.18); color:#fdb022; }
+      :host([data-theme="dark"]) .wf-cs.is-bad { background:rgba(240,68,56,.18); color:#fda29b; }
+      :host([data-theme="dark"]) .wf-cs.is-none { color:#667085; }
       :host([data-theme="dark"]) .wf-xchip.now { background:rgba(18,183,106,.16); color:#75e0a7; }
       :host([data-theme="dark"]) .wf-xchip.max { background:rgba(247,144,9,.16); color:#fdb022; }
       :host([data-theme="dark"]) .wf-xfound { color:#98a2b3; }
@@ -1342,6 +1399,209 @@
     return monitored.includes(card.conversationId);
   }
 
+  // ---- 最近 CA：按地址去重，最新一次提及排前；同一地址在多群/多次发出时累计次数 ----
+
+  // EVM/Sui 的 0x 地址不分大小写；Solana、Tron、TON 区分大小写，原样保留（与 castore._addr 一致）。
+  function caKey(address) {
+    const text = String(address || "").trim();
+    return /^0x/i.test(text) ? text.toLowerCase() : text;
+  }
+
+  function isWalletToken(token) {
+    return Boolean(token) && (token.kind === "wallet" || token.source === "gmgn-wallet");
+  }
+
+  function recentCaEntries(cards, settings, limit) {
+    const max = Number(limit) > 0 ? Number(limit) : 10;
+    const rows = (cards || [])
+      .filter((card) => card && (card.addresses || []).length && cardInFeed(card, settings || {}, true))
+      .sort((a, b) => (b.createTime || 0) - (a.createTime || 0) || (b.receivedAt || 0) - (a.receivedAt || 0));
+    const entries = new Map();
+    for (const card of rows) {
+      const tokens = new Map();
+      for (const token of card.tokenCards || []) {
+        if (token && token.address) tokens.set(caKey(token.address), token);
+      }
+      const chains = new Map((card.cas || []).map((item) => [caKey(item.address), item.chain || ""]));
+      const seen = new Set();
+      for (const raw of card.addresses || []) {
+        const key = caKey(raw);
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        const token = tokens.get(key) || null;
+        if (isWalletToken(token)) continue;
+        let entry = entries.get(key);
+        if (!entry) {
+          // 已满 10 个就不再收新地址，但继续给已有地址累计次数。
+          if (entries.size >= max) continue;
+          // 战绩跟着展示的那条（最新一次）的发送人走，不能用回退到更早那条的 token 上的。
+          const callerStats = (token && token.callerStats) || null;
+          entry = { key, address: String(raw), chain: "", card, token: null, callerStats, count: 0, groups: new Set() };
+          entries.set(key, entry);
+        }
+        entry.count += 1;
+        if (card.conversationId) entry.groups.add(card.conversationId);
+        // 最新那条优先；它还没查到市值时退到更早一条已有数据的。
+        if (token && (!entry.token || (!entry.token.marketCap && token.marketCap))) entry.token = token;
+        if (!entry.chain) entry.chain = (token && token.chain) || chains.get(key) || "";
+      }
+    }
+    return Array.from(entries.values()).map((entry) => {
+      const { groups, ...rest } = entry;
+      return { ...rest, groupCount: groups.size };
+    });
+  }
+
+  function recentSymbol(entry) {
+    const token = entry.token || {};
+    return token.symbol ? `$${token.symbol}` : shortAddress(entry.address);
+  }
+
+  function recentXHtml(value) {
+    const text = formatX(value);
+    if (!text) return "";
+    return `<b class="rc-x ${Number(value) >= 1 ? "is-up" : "is-down"}">${escapeText(text)}</b>`;
+  }
+
+  function recentDupHtml(entry, short) {
+    if (entry.count <= 1) return "";
+    const groups = entry.groupCount > 1 ? `，涉及 ${entry.groupCount} 个群` : "";
+    const label = short
+      ? `×${entry.count}`
+      : `发了 ${entry.count} 次${entry.groupCount > 1 ? ` · ${entry.groupCount} 群` : ""}`;
+    return `<span class="rc-dup" title="最近 ${entry.count} 条消息发过这个 CA${groups}">${escapeText(label)}</span>`;
+  }
+
+  // 代币头像：有 logo 用 logo（走 wf-token-logo，插件里会被代理成 data URL），否则首字母。
+  function recentLogo(entry, size) {
+    const token = entry.token || {};
+    const dim = `style="width:${size}px;height:${size}px;border-radius:${Math.round(size / 4)}px;font-size:${Math.round(size * 0.45)}px"`;
+    if (token.logo) {
+      const src = escapeText(token.logo);
+      return `<img class="wf-token-logo rc-logo" ${dim} src="${src}" data-wf-src="${src}" alt="" />`;
+    }
+    const letter = String(token.symbol || "?").slice(0, 1);
+    return `<span class="wf-token-logo wf-token-fallback rc-logo" ${dim}>${escapeText(letter)}</span>`;
+  }
+
+  function clockText(seconds) {
+    return formatTime(seconds).split(":").slice(0, 2).join(":");
+  }
+
+  function recentTickHtml(entry) {
+    if (!entry) return "";
+    const token = entry.token || {};
+    const card = entry.card;
+    const name = card.displayName || card.senderName || "群成员";
+    const cap = moneyHtml(token.marketCap, token.marketCapText || "");
+    return `<div class="rc-tick" data-recent-open title="最新 CA · 点开看最近 10 条">
+      <span class="rc-tag">新</span>
+      ${recentLogo(entry, 18)}
+      <strong class="rc-sym">${escapeText(recentSymbol(entry))}</strong>
+      ${cap ? `<span class="rc-cap is-${mcapTone(token.marketCap)}">${cap}</span>` : ""}
+      ${recentXHtml(token.nowX)}
+      ${recentDupHtml(entry, true)}
+      <span class="rc-who">${escapeText(name)}</span>
+      ${callerStatsHtml(entry.callerStats, true)}
+      <span class="rc-time">${freshHtml(card.createTime)}<time>${escapeText(clockText(card.createTime))}</time></span>
+      <button type="button" class="rc-copy" data-copy="${escapeText(entry.address)}" title="复制 CA：${escapeText(entry.address)}">复制</button>
+    </div>`;
+  }
+
+  // 上下文只做纯文本：合约（包括前后句里别的合约）缩成短地址，面板保持紧凑。
+  const LONG_ADDRESS = /\b(?:0x[0-9a-fA-F]{30,64}|[1-9A-HJ-NP-Za-km-z]{32,48})\b/g;
+
+  function recentText(value) {
+    const text = escapeText(value || "").replace(
+      LONG_ADDRESS,
+      (match) => `<code title="${match}">${escapeText(shortAddress(match))}</code>`,
+    );
+    return text || "…";
+  }
+
+  function recentContextHtml(card) {
+    const line = (item, cls) => `<li class="${cls}">
+        <time>${escapeText(formatTime(item.createTime))}</time>
+        <span>${recentText(item.text)}</span>
+      </li>`;
+    const now = { createTime: card.createTime, text: card.text || card.quoteText || "" };
+    return `<ol class="rc-ctx">
+      ${(card.contextBefore || []).map((item) => line(item, "is-before")).join("")}
+      ${line(now, "is-now")}
+      ${(card.contextAfter || []).map((item) => line(item, "is-after")).join("")}
+    </ol>`;
+  }
+
+  function recentItemHtml(entry, unread) {
+    const token = entry.token || {};
+    const card = entry.card;
+    const name = card.displayName || card.senderName || "群成员";
+    const group = card.displayGroup || card.conversationName || "群聊";
+    const userId = card.senderUsername || "";
+    const fullName = token.name && token.name !== token.symbol ? token.name : "";
+    const cap = moneyHtml(token.marketCap, token.marketCapText || "");
+    const first = moneyHtml(token.firstMcap, "");
+    const nowX = formatX(token.nowX);
+    const maxX = formatX(token.maxX);
+    const address = escapeText(entry.address);
+    const tile = (label, value, cls) =>
+      `<div class="rc-m${cls ? ` ${cls}` : ""}"><span>${label}</span><b>${value || "—"}</b></div>`;
+    const xCls = (value) => (Number(value) >= 1 ? "is-up" : Number(value) > 0 ? "is-down" : "");
+    const avatar = `<div class="wf-avatar rc-av" style="background:hsl(${hue(userId || name)} 62% 46%)">${card.avatarUrl ? lazyImg(card.avatarUrl, "") : ""}<span>${escapeText(initial(name))}</span></div>`;
+    const who = userId
+      ? `<button type="button" class="rc-person" data-ca-user="${escapeText(userId)}" title="看 ${escapeText(name)} 的全部喊单">${escapeText(clipText(name, NAME_MAX))}</button>`
+      : `<strong class="rc-person">${escapeText(clipText(name, NAME_MAX))}</strong>`;
+    // 首喊人不是这次的发送人时，单独一行带上他的战绩。
+    const foundOther = token.foundBy && token.foundById && token.foundById !== userId;
+    const found = foundOther
+      ? `<div class="rc-caller is-first">
+          <span class="rc-k">首喊</span>
+          <button type="button" class="rc-person" data-ca-user="${escapeText(token.foundById)}">${escapeText(clipText(token.foundBy, NAME_MAX))}</button>
+          ${callerStatsHtml(token.foundByStats, true)}
+          ${token.foundGroup ? `<span class="rc-in">${escapeText(clipText(token.foundGroup, GROUP_MAX))}</span>` : ""}
+        </div>`
+      : "";
+    const link = token.url
+      ? `<a class="rc-btn" href="${escapeText(token.url)}" target="_blank" rel="noreferrer">K线</a>`
+      : "";
+    return `<article class="rc-item${unread ? " is-unread" : ""}" data-rc-key="${escapeText(entry.key)}">
+      <div class="rc-top">
+        ${recentLogo(entry, 36)}
+        <div class="rc-id">
+          <div class="rc-row">
+            <strong class="rc-sym">${escapeText(recentSymbol(entry))}</strong>
+            ${entry.chain ? chainBadge(entry.chain) : ""}
+            ${recentDupHtml(entry, false)}
+            <span class="rc-time">${freshHtml(card.createTime)}<time>${escapeText(clockText(card.createTime))}</time></span>
+          </div>
+          <div class="rc-row rc-sub2">
+            ${fullName ? `<span class="rc-name">${escapeText(clipText(fullName, 14))}</span>` : ""}
+            <code class="rc-addr" title="${address}">${escapeText(shortAddress(entry.address))}</code>
+          </div>
+        </div>
+      </div>
+      <div class="rc-metrics">
+        ${tile("现市值", cap, `is-cap is-${mcapTone(token.marketCap)}`)}
+        ${tile("首喊市值", first)}
+        ${tile("当前", nowX ? escapeText(nowX) : "", xCls(token.nowX))}
+        ${tile("最高", maxX ? escapeText(maxX) : "", maxX ? "is-max" : "")}
+      </div>
+      <div class="rc-caller">
+        ${avatar}
+        ${who}
+        ${callerStatsHtml(entry.callerStats, false)}
+        <span class="rc-in">${escapeText(clipText(group, GROUP_MAX))}</span>
+      </div>
+      ${found}
+      ${recentContextHtml(card)}
+      <div class="rc-acts">
+        <button type="button" class="rc-btn is-main" data-copy="${address}">复制 CA</button>
+        <button type="button" class="rc-btn" data-jump="${escapeText(card.id)}">跳到原消息</button>
+        ${link}
+      </div>
+    </article>`;
+  }
+
   root.WechatFeed = {
     cardHtml,
     gmgnCardHtml,
@@ -1369,6 +1629,10 @@
     monitoredGroupIds,
     selectedFeedGroups,
     nextFeedGroups,
+    caKey,
+    recentCaEntries,
+    recentTickHtml,
+    recentItemHtml,
     starColors: STAR_COLORS,
   };
 })(globalThis);

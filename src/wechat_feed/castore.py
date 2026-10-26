@@ -35,6 +35,8 @@ SETTLE_WINDOW = 6 * 3600
 FINAL_AGE = 7 * 86400
 # 榜单与统计的内存缓存：数据没变且不超过这么久就直接复用（待定状态随时间变化，所以要有上限）。
 BOARD_CACHE_TTL = 30
+# 卡片上「喊单人胜率」的缓存：每条新喊单都会写库，这里至少复用 5 秒，免得逐条重算整张榜。
+CALLER_STATS_MIN_AGE = 5
 # 超过 24 小时没人再喊、且现市值低于 1.5 万的币暂停拉 K 线，下次被喊到再恢复。
 DORMANT_AGE = 24 * 3600
 DORMANT_MCAP = 15_000.0
@@ -356,7 +358,14 @@ class CaStore:
             self._commit()
         return dropped
 
-    def remember(self, card: dict[str, Any], tokens: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def remember(
+        self,
+        card: dict[str, Any],
+        tokens: list[dict[str, Any]],
+        *,
+        with_stats: bool = True,
+    ) -> list[dict[str, Any]]:
+        """with_stats=False：启动回灌只建档，不补胜率（逐条补会让榜单反复重算）。"""
         now = int(card.get("createTime") or time.time())
         if self._is_purged(now):
             return tokens
@@ -430,7 +439,10 @@ class CaStore:
                     )
                 out.append(self._decorate(token, chain, address, card_id, caller_id, now, group_id))
             self._commit()
-        return out
+        if not with_stats:
+            return out
+        # 胜率要读整张榜（内部会加锁），必须在锁外补。
+        return self.attach_stats(out, caller_id)
 
     def _heal_case(self, chain: str, address: str) -> None:
         """旧版把 Solana 等 base58 地址存成了小写，GMGN 不认；见到原大小写就原地改回来。"""
@@ -771,7 +783,52 @@ class CaStore:
                 else token
                 for token in tokens
             ]
+        card["tokenCards"] = self.attach_stats(card["tokenCards"], sender_id)
         return card
+
+    def caller_stats_map(self, *, fresh: bool = False) -> dict[str, dict[str, Any]]:
+        """全部时间段榜单按人索引，只留卡片要用的字段。fresh：库有变化就重算，不等 5 秒。"""
+        hit = self._cache.get("callers")
+        now = time.time()
+        if hit:
+            age = now - hit[1]
+            same = hit[0] == self._version
+            if (same and age < BOARD_CACHE_TTL) or (not fresh and age < CALLER_STATS_MIN_AGE):
+                return hit[2]
+        version = self._version
+        value = {
+            row["userId"]: {
+                "calls": row["calls"],
+                "settled": row["settled"],
+                "wins": row["wins"],
+                "pending": row["pending"],
+                "winRate": round(row["winRate"], 4),
+                "avgX": round(row["avgX"], 2),
+                "maxX": round(row["maxX"], 2),
+                "rank": row["rank"],
+            }
+            for row in self._board("all", int(now))
+        }
+        self._cache["callers"] = (version, now, value)
+        return value
+
+    def attach_stats(self, tokens: list[Any], caller_id: str) -> list[Any]:
+        """给已建档的代币补喊单人、所有群首发人、本群首发人的胜率与喊单数。"""
+        if not any(isinstance(token, dict) and "firstMcap" in token for token in tokens):
+            return tokens
+        ident = _text(caller_id)
+        stats = self.caller_stats_map()
+        if ident and ident not in stats:
+            # 新人第一次喊单：缓存里还没有他，库变了就立刻重算一次。
+            stats = self.caller_stats_map(fresh=True)
+        caller = stats.get(ident)
+        for token in tokens:
+            if not isinstance(token, dict) or "firstMcap" not in token:
+                continue
+            token["callerStats"] = caller
+            token["foundByStats"] = stats.get(_text(token.get("foundById")))
+            token["groupFoundByStats"] = stats.get(_text(token.get("groupFoundById")))
+        return tokens
 
     def _rank_rows(self, rows: list[sqlite3.Row], now: int | None = None) -> list[dict[str, Any]]:
         stamp = int(now or time.time())

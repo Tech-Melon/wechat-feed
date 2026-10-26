@@ -976,6 +976,19 @@ body {
   font-weight: 700;
 }
 .wf-discover-meta { color: #667085; font-size: 12px; margin-top: 2px; }
+/* 喊单人战绩：与 extension/feed.js 的 cardCss 保持一致 */
+.wf-caller { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; min-width: 0; }
+.wf-caller-k { color: #667085; font-size: 11px; font-weight: 800; letter-spacing: .06em; }
+.wf-caller-av { width: 20px; height: 20px; font-size: 10px; }
+.wf-caller .wf-discover-name { font-size: 13px; max-width: 9em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wf-cs { display: inline-flex; align-items: center; gap: 4px; height: 20px; padding: 0 7px; border-radius: 999px; font-size: 11.5px; line-height: 20px; white-space: nowrap; flex: none; cursor: help; background: #f2f4f7; color: #475467; }
+.wf-cs b { font-weight: 800; }
+.wf-cs span { opacity: .75; font-weight: 600; }
+.wf-cs.is-good { background: #dcfae6; color: #067647; }
+.wf-cs.is-mid { background: #fef0c7; color: #b54708; }
+.wf-cs.is-bad { background: #fee4e2; color: #b42318; }
+.wf-cs.is-none { color: #98a2b3; font-weight: 600; }
+.wf-cs-rank { font-style: normal; font-weight: 800; font-size: 10.5px; padding: 0 4px; border-radius: 4px; background: linear-gradient(90deg, #f59e0b, #f97316); color: #fff; line-height: 15px; }
 
 .ca-switch {
   display: inline-flex;

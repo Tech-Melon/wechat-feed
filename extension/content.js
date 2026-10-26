@@ -8,6 +8,12 @@
   let floatSites = DEFAULT_FLOAT_SITES;
   let lastHref = location.href;
   const cards = new Map();
+  // 最近 CA 面板单独存一份含合约的卡：主列表分页会清空 cards，这里不跟着丢。
+  const caCards = new Map();
+  const CA_KEEP = 300;
+  const RECENT_LIMIT = 10;
+  let recentSeen = 0;
+  let recentTop = "";
   let settings = {
     gmgn_overlay: false,
     float_panel: false,
@@ -226,8 +232,13 @@
         }
         if (img.classList.contains("wf-token-logo")) {
           const letter = document.createElement("span");
-          letter.className = "wf-token-logo wf-token-fallback";
-          const sym = img.closest(".wf-token")?.querySelector(".wf-token-title strong")?.textContent || "?";
+          // 保留原有的类和尺寸（最近 CA 的小图标是内联尺寸）。
+          letter.className = `${img.className} wf-token-fallback`;
+          letter.style.cssText = img.style.cssText;
+          const sym =
+            img
+              .closest(".wf-token, .rc-item, .rc-tick")
+              ?.querySelector(".wf-token-title strong, .rc-sym")?.textContent || "?";
           letter.textContent = String(sym).replace("$", "").slice(0, 1) || "?";
           img.replaceWith(letter);
           return;
@@ -567,11 +578,15 @@
     }
   }
 
+  function statStamp(stats) {
+    return stats ? `${stats.calls || 0}/${stats.wins || 0}/${stats.settled || 0}/${stats.rank || 0}` : "-";
+  }
+
   function tokenStamp(card) {
     return (card.tokenCards || [])
       .map(
         (token) =>
-          `${token.source || ""}:${token.marketCap || 0}:${token.liquidity || 0}:${token.holders || 0}:${token.nowX || 0}:${token.maxX || 0}:${token.groupNowX || 0}:${token.foundById || ""}:${token.isFirstCall ? 1 : 0}:${token.isGroupFirst ? 1 : 0}`
+          `${token.source || ""}:${token.marketCap || 0}:${token.liquidity || 0}:${token.holders || 0}:${token.nowX || 0}:${token.maxX || 0}:${token.groupNowX || 0}:${token.foundById || ""}:${token.isFirstCall ? 1 : 0}:${token.isGroupFirst ? 1 : 0}:${statStamp(token.callerStats)}:${statStamp(token.foundByStats)}:${statStamp(token.groupFoundByStats)}`
       )
       .join(",");
   }
@@ -610,6 +625,7 @@
       }
       syncGroupButton(floatHost);
       paintList(list);
+      paintRecent(floatHost);
     }
     if (overlayOn() && isFollowPage()) syncStream();
   }
@@ -644,6 +660,87 @@
       :host([data-theme="dark"]) .totop { background:#f2f4f7; color:#111827; }
       .chip { border:0; border-radius:999px; background:#111827; color:white; padding:8px 12px; box-shadow:0 8px 24px rgba(0,0,0,.2); cursor:pointer; }
       .resize { position:absolute; right:4px; bottom:4px; width:18px; height:18px; cursor:nwse-resize; border-right:3px solid #98a2b3; border-bottom:3px solid #98a2b3; opacity:.85; }
+      /* 最近 CA：标题栏图标 + 一行最新 CA + 下拉面板 */
+      .bar [data-recent] { position:relative; flex:none; display:grid; place-items:center; width:26px; height:22px; padding:0; border:1px solid var(--line); border-radius:999px; background:transparent; color:inherit; cursor:pointer; }
+      .bar [data-recent].on { background:#111827; color:#fff; border-color:#111827; }
+      :host([data-theme="dark"]) .bar [data-recent].on { background:#f2f4f7; color:#111827; border-color:#f2f4f7; }
+      .rc-badge { position:absolute; top:-6px; right:-6px; min-width:15px; height:15px; padding:0 4px; border-radius:999px; background:#e5484d; color:#fff; font:700 10px/15px sans-serif; text-align:center; box-shadow:0 0 0 2px var(--card); }
+      .rc-badge[hidden], .rc-bar[hidden], .rc-panel[hidden] { display:none; }
+      .rc-bar { flex:none; border-bottom:1px solid var(--line); }
+      .rc-tick { display:flex; align-items:center; gap:6px; width:100%; height:28px; padding:0 6px 0 8px; background:color-mix(in srgb, #e5484d 6%, var(--card)); color:var(--ink); font-size:12px; line-height:28px; cursor:pointer; white-space:nowrap; overflow:hidden; }
+      .rc-tick:hover { background:color-mix(in srgb, #e5484d 12%, var(--card)); }
+      .rc-tick.is-new { animation:rc-flash 1.6s ease-out 1; }
+      @keyframes rc-flash { 0%,30% { background:color-mix(in srgb, #e5484d 30%, var(--card)); } 100% { background:color-mix(in srgb, #e5484d 6%, var(--card)); } }
+      .rc-tag { flex:none; display:grid; place-items:center; width:18px; height:18px; border-radius:5px; background:#e5484d; color:#fff; font-size:11px; font-weight:800; line-height:1; }
+      .rc-logo { flex:none; display:grid; place-items:center; object-fit:cover; line-height:1; }
+      .rc-sym { flex:none; max-width:84px; overflow:hidden; text-overflow:ellipsis; font-weight:800; font-size:13px; }
+      .rc-cap { flex:none; font-weight:800; }
+      .rc-cap .wf-metric-unit, .rc-m .wf-metric-unit { margin-left:1px; font-size:.75em; }
+      .rc-cap.is-hot, .rc-m.is-cap.is-hot b { color:#d92d20; }
+      .rc-cap.is-amber, .rc-m.is-cap.is-amber b { color:#dc6803; }
+      .rc-cap.is-green, .rc-m.is-cap.is-green b { color:#079455; }
+      .rc-cap.is-blue, .rc-m.is-cap.is-blue b { color:#1570ef; }
+      :host([data-theme="dark"]) .rc-cap.is-hot, :host([data-theme="dark"]) .rc-m.is-cap.is-hot b { color:#fda29b; }
+      :host([data-theme="dark"]) .rc-cap.is-amber, :host([data-theme="dark"]) .rc-m.is-cap.is-amber b { color:#fdb022; }
+      :host([data-theme="dark"]) .rc-cap.is-green, :host([data-theme="dark"]) .rc-m.is-cap.is-green b { color:#75e0a7; }
+      :host([data-theme="dark"]) .rc-cap.is-blue, :host([data-theme="dark"]) .rc-m.is-cap.is-blue b { color:#84adff; }
+      .rc-x { flex:none; font-weight:800; }
+      .rc-x.is-up, .rc-m.is-up b { color:#067647; }
+      .rc-x.is-down, .rc-m.is-down b { color:#b42318; }
+      .rc-m.is-max b { color:#c2410c; }
+      :host([data-theme="dark"]) .rc-x.is-up, :host([data-theme="dark"]) .rc-m.is-up b { color:#75e0a7; }
+      :host([data-theme="dark"]) .rc-x.is-down, :host([data-theme="dark"]) .rc-m.is-down b { color:#fda29b; }
+      :host([data-theme="dark"]) .rc-m.is-max b { color:#fdb022; }
+      .rc-dup { flex:none; padding:0 6px; border-radius:999px; background:#fff4d6; color:#b54708; font-size:11px; font-weight:800; line-height:16px; }
+      :host([data-theme="dark"]) .rc-dup { background:rgba(247,144,9,.18); color:#fdb022; }
+      .rc-who { flex:0 1 auto; min-width:2em; overflow:hidden; text-overflow:ellipsis; color:var(--muted); }
+      .rc-tick .wf-cs { height:18px; line-height:18px; padding:0 6px; font-size:11px; }
+      .rc-time { flex:none; margin-left:auto; color:var(--muted); font-size:11.5px; }
+      .rc-time .wf-fresh:not([hidden]) + time { display:none; }
+      .rc-copy { flex:none; height:20px; padding:0 8px; border:0; border-radius:6px; background:#2e90fa; color:#fff; font:700 11px/20px inherit; cursor:pointer; }
+      .rc-copy:hover { background:#1570ef; }
+      .rc-panel { position:absolute; left:8px; right:8px; z-index:7; display:flex; flex-direction:column; max-height:72%; background:var(--card); color:var(--ink); border:1px solid var(--line); border-radius:12px; box-shadow:0 12px 32px rgba(0,0,0,.28); overflow:hidden; }
+      .rc-head { display:flex; align-items:baseline; gap:8px; padding:8px 10px; border-bottom:1px solid var(--line); }
+      .rc-head strong { font-size:13px; }
+      .rc-sub { color:var(--muted); font-size:11px; }
+      .rc-list { flex:1 1 auto; min-height:0; overflow:auto; overscroll-behavior:contain; padding:6px; display:flex; flex-direction:column; gap:8px; }
+      .rc-list .empty { padding:18px 8px; text-align:center; color:var(--muted); }
+      .rc-item { padding:10px; border:1px solid var(--line); border-left:3px solid #e5484d; border-radius:12px; display:grid; gap:8px; }
+      .rc-item.is-unread { background:color-mix(in srgb, #e5484d 5%, var(--card)); }
+      .rc-top { display:flex; gap:10px; align-items:center; min-width:0; }
+      .rc-id { display:grid; gap:3px; min-width:0; flex:1; }
+      .rc-row { display:flex; align-items:center; gap:6px; min-width:0; }
+      .rc-item .rc-sym { max-width:120px; font-size:15px; }
+      .rc-item .wf-chain { flex:none; }
+      .rc-sub2 { font-size:12px; }
+      .rc-name { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--muted); }
+      .rc-metrics { display:grid; grid-template-columns:repeat(4, minmax(0,1fr)); gap:4px; }
+      .rc-m { display:grid; gap:1px; padding:5px 7px; border-radius:8px; background:color-mix(in srgb, var(--ink) 4%, transparent); min-width:0; }
+      .rc-m span { color:var(--muted); font-size:10.5px; font-weight:700; }
+      .rc-m b { font-size:14px; font-weight:800; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+      .rc-m.is-cap { background:color-mix(in srgb, #2e90fa 8%, transparent); }
+      .rc-m.is-cap b { font-size:15px; }
+      .rc-caller { display:flex; align-items:center; gap:6px; min-width:0; font-size:12px; }
+      .rc-caller.is-first { margin-top:-4px; color:var(--muted); }
+      .rc-av { width:22px; height:22px; font-size:11px; }
+      .rc-k { flex:none; color:var(--muted); font-size:11px; font-weight:800; }
+      .rc-person { flex:0 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; border:0; padding:0; background:transparent; color:inherit; font:inherit; font-weight:800; cursor:pointer; }
+      button.rc-person:hover { color:#175cd3; }
+      .rc-in { flex:none; margin-left:auto; padding:0 7px; border-radius:999px; background:#e8f1ff; color:#175cd3; font-size:11px; font-weight:700; line-height:18px; }
+      :host([data-theme="dark"]) .rc-in { background:rgba(46,144,250,.22); color:#b2ccff; }
+      .rc-ctx { margin:0; padding:6px 8px; list-style:none; border-radius:8px; background:color-mix(in srgb, var(--ink) 4%, transparent); display:grid; gap:2px; font-size:12px; }
+      .rc-ctx li { display:grid; grid-template-columns:auto minmax(0,1fr); gap:6px; color:var(--muted); }
+      .rc-ctx li span { overflow:hidden; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; word-break:break-word; }
+      .rc-ctx li.is-now { color:var(--ink); font-weight:600; }
+      .rc-ctx time { font-size:11px; opacity:.8; }
+      .rc-ctx code, .rc-addr { padding:0 4px; border-radius:4px; background:rgba(193,31,168,.08); color:#c11fa8; font:11.5px/1.5 Consolas,"SFMono-Regular",Menlo,monospace; }
+      :host([data-theme="dark"]) .rc-ctx code, :host([data-theme="dark"]) .rc-addr { background:rgba(217,70,239,.12); color:#f0abfc; }
+      .rc-acts { display:flex; gap:6px; }
+      .rc-acts .rc-btn.is-main { flex:1; }
+      .rc-btn { height:22px; padding:0 8px; border:1px solid var(--line); border-radius:6px; background:transparent; color:inherit; font:700 11.5px/20px inherit; cursor:pointer; text-decoration:none; }
+      .rc-btn.is-main { border-color:#2e90fa; background:#2e90fa; color:#fff; }
+      .list > .wf-card.wf-jump-flash { animation:rc-jump 1.8s ease-out 1; }
+      @keyframes rc-jump { 0%,40% { box-shadow:0 0 0 2px #e5484d; } 100% { box-shadow:0 0 0 0 transparent; } }
     </style>
     <section class="wrap">
       <header class="bar" title="点昵称备注此人、点群名备注这个群、点☆星标。拖动此栏可移动窗口。">
@@ -655,9 +752,15 @@
           <button type="button" data-all class="on">全部</button>
           <button type="button" data-ca>只看CA</button>
         </div>
+        <button type="button" data-recent title="最近 10 条 CA" aria-label="最近 10 条 CA"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M8 4.6V8l2.4 1.6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg><span class="rc-badge" hidden></span></button>
         <button type="button" data-groups>群</button>
         <button type="button" data-collapse>收起</button>
       </header>
+      <div class="rc-bar" hidden></div>
+      <div class="rc-panel" hidden>
+        <div class="rc-head"><strong>最近 CA</strong><span class="rc-sub">只看 CA 的群来源 · 按合约去重</span></div>
+        <div class="rc-list"></div>
+      </div>
       <div class="gpick" hidden>
         <p class="gpick-title">群聊选择管理</p>
         <div class="gpick-list"></div>
@@ -937,11 +1040,183 @@
       settings[key] = next;
       fillGroupPicker(host);
       paintAll();
-      send("setFeedGroups", { caOnly: key === "ca_feed_groups", groups: next });
+      const saved = send("setFeedGroups", { caOnly: key === "ca_feed_groups", groups: next });
+      // 本地已先改了 settings，后台回推的设置比对不出变化，这里主动重拉最近 CA。
+      if (key === "ca_feed_groups") saved.then(requestRecentCa);
     });
     shadow.querySelector("[data-collapse]").addEventListener("click", collapse);
+    wireRecent(host, shadow);
     syncGroupButton(host);
     paintList(list);
+  }
+
+  // ---- 最近 CA ----
+
+  function recentEntries() {
+    if (typeof WechatFeed === "undefined" || !WechatFeed.recentCaEntries) return [];
+    return WechatFeed.recentCaEntries(Array.from(caCards.values()), settings, RECENT_LIMIT).map((entry) => ({
+      ...entry,
+      card: present(entry.card),
+    }));
+  }
+
+  function markRecentSeen(entries) {
+    const latest = entries.reduce((max, entry) => Math.max(max, Number(entry.card.createTime) || 0), 0);
+    if (latest <= recentSeen) return;
+    recentSeen = latest;
+    try {
+      chrome.storage.local.set({ recentCaSeen: recentSeen });
+    } catch (error) {
+      // 插件重载后旧脚本的 storage 失效，下次打开再记
+    }
+  }
+
+  function paintRecent(host) {
+    if (!host || !host._rcBar) return;
+    const entries = recentEntries();
+    const open = !host._rcPanel.hidden;
+    if (open) markRecentSeen(entries);
+    const unread = entries.filter((entry) => (Number(entry.card.createTime) || 0) > recentSeen).length;
+    host._rcBadge.hidden = !unread;
+    host._rcBadge.textContent = unread > 9 ? "9+" : String(unread);
+    const top = entries[0];
+    host._rcBar.hidden = !top;
+    if (top) {
+      const html = WechatFeed.recentTickHtml(top);
+      if (host._rcBar.__wfHtml !== html) {
+        host._rcBar.__wfHtml = html;
+        host._rcBar.innerHTML = html;
+        // 只有换了一个新的最新 CA 才闪一下，市值刷新不闪。
+        const topKey = `${top.key}:${top.card.id}`;
+        if (recentTop && recentTop !== topKey) host._rcBar.firstElementChild.classList.add("is-new");
+        recentTop = topKey;
+        hydrate(host._rcBar);
+        WechatFeed.startFreshTick(host._rcBar);
+      }
+    } else {
+      host._rcBar.__wfHtml = "";
+      host._rcBar.replaceChildren();
+    }
+    if (!open) return;
+    const list = host._rcList;
+    if (!entries.length) {
+      list.innerHTML = `<div class="empty">关注群里还没有 CA。</div>`;
+      return;
+    }
+    if (list.querySelector(":scope > .empty")) list.replaceChildren();
+    // 打开那一刻的已读线：本次打开前没看过的条目保留未读底色，直到关掉。
+    const seenLine = host._rcSeenAtOpen || 0;
+    const created = WechatFeed.syncList(
+      list,
+      entries,
+      (entry) => entry.key,
+      (entry) => WechatFeed.recentItemHtml(entry, (Number(entry.card.createTime) || 0) > seenLine),
+    );
+    created.forEach((node) => hydrate(node));
+    WechatFeed.startFreshTick(list);
+  }
+
+  function setRecentOpen(host, open) {
+    const panel = host._rcPanel;
+    if (open === !panel.hidden) return;
+    if (open) {
+      if (host._gpick) host._gpick.hidden = true;
+      host._rcSeenAtOpen = recentSeen;
+      const below = host._rcBar.hidden ? host._rcBar.previousElementSibling : host._rcBar;
+      panel.style.top = `${below.offsetTop + below.offsetHeight + 4}px`;
+      panel.hidden = false;
+      host._rcList.replaceChildren();
+    } else {
+      panel.hidden = true;
+    }
+    host._rcBtn.classList.toggle("on", open);
+    paintRecent(host);
+  }
+
+  function flashButton(button, text) {
+    if (!button.dataset.label) button.dataset.label = button.textContent;
+    button.textContent = text;
+    clearTimeout(button._reset);
+    button._reset = setTimeout(() => {
+      button.textContent = button.dataset.label;
+    }, 1400);
+  }
+
+  function jumpToCard(host, cardId, button) {
+    const card = cards.get(cardId);
+    if (!card) {
+      flashButton(button, "较早未加载");
+      return;
+    }
+    // 当前模式/群来源下看不到这条，就切到只看 CA（它一定在 CA 来源里）。
+    if (!WechatFeed.cardInFeed(card, settings, Boolean(settings.float_ca_only))) {
+      settings.float_ca_only = true;
+      send("setSurfaceMode", { surface: "float", enabled: true });
+    }
+    const index = visibleCards(settings.float_ca_only).findIndex((item) => item.id === cardId);
+    if (index < 0) {
+      flashButton(button, "当前筛选看不到");
+      return;
+    }
+    if (index >= floatLimit) floatLimit = Math.ceil((index + 1) / FLOAT_PAGE) * FLOAT_PAGE;
+    paintAll();
+    const node = host._list.querySelector(`:scope > [data-id="${CSS.escape(cardId)}"]`);
+    if (!node) {
+      flashButton(button, "没找到");
+      return;
+    }
+    setRecentOpen(host, false);
+    node.scrollIntoView({ block: "center", behavior: "smooth" });
+    node.classList.remove("wf-jump-flash");
+    void node.offsetWidth;
+    node.classList.add("wf-jump-flash");
+  }
+
+  function wireRecent(host, shadow) {
+    host._rcBtn = shadow.querySelector("[data-recent]");
+    host._rcBadge = shadow.querySelector(".rc-badge");
+    host._rcBar = shadow.querySelector(".rc-bar");
+    host._rcPanel = shadow.querySelector(".rc-panel");
+    host._rcList = shadow.querySelector(".rc-list");
+    // 标题栏整条可拖动，按钮上按下不能触发拖动。
+    host._rcBtn.addEventListener("mousedown", (event) => event.stopPropagation());
+    host._rcBtn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      setRecentOpen(host, host._rcPanel.hidden);
+    });
+    // 顶部这一行：「复制」走通用复制，其余位置点开 / 收起面板。
+    bindList(shadow, host._rcBar);
+    host._rcBar.addEventListener("click", (event) => {
+      if (event.target.closest("[data-copy]")) return;
+      setRecentOpen(host, host._rcPanel.hidden);
+    });
+    // 复制、点头像等沿用列表的通用处理；跳转单独处理。
+    bindList(shadow, host._rcList);
+    host._rcList.addEventListener("click", (event) => {
+      const jump = event.target.closest("[data-jump]");
+      if (jump) jumpToCard(host, jump.dataset.jump, jump);
+    });
+    // 点面板外（含浮窗外）或按 Esc 关闭。
+    shadow.addEventListener("mousedown", (event) => {
+      if (host._rcPanel.hidden) return;
+      const path = event.composedPath();
+      if (path.includes(host._rcPanel) || path.includes(host._rcBtn) || path.includes(host._rcBar)) return;
+      setRecentOpen(host, false);
+    });
+    const outside = (event) => {
+      if (!host.isConnected) {
+        document.removeEventListener("mousedown", outside, true);
+        document.removeEventListener("keydown", onKey, true);
+        return;
+      }
+      if (!host._rcPanel.hidden && !event.composedPath().includes(host)) setRecentOpen(host, false);
+    };
+    const onKey = (event) => {
+      if (event.key === "Escape" && !host._rcPanel.hidden) setRecentOpen(host, false);
+    };
+    document.addEventListener("mousedown", outside, true);
+    document.addEventListener("keydown", onKey, true);
+    paintRecent(host);
   }
 
   async function mountFloat() {
@@ -1168,8 +1443,23 @@
     port.postMessage(payload);
   }
 
+  function rememberCa(card) {
+    if (!card || !card.id || !(card.addresses || []).length) return;
+    caCards.set(card.id, card);
+    if (caCards.size <= CA_KEEP) return;
+    const stale = Array.from(caCards.values())
+      .sort((a, b) => (a.createTime || 0) - (b.createTime || 0))
+      .slice(0, caCards.size - CA_KEEP);
+    for (const item of stale) caCards.delete(item.id);
+  }
+
+  function requestRecentCa() {
+    if (port) port.postMessage({ type: "recentCa" });
+  }
+
   function remember(card, paint = true) {
     if (!card || !card.id) return;
+    rememberCa(card);
     cards.set(card.id, card);
     const time = Number(card.createTime) || 0;
     const received = Number(card.receivedAt) || 0;
@@ -1199,11 +1489,14 @@
         const listenChanged =
           JSON.stringify(settings.group_users || {}) !== JSON.stringify(message.settings.group_users || {})
           || JSON.stringify(settings.blocked_users || []) !== JSON.stringify(message.settings.blocked_users || []);
+        const caGroupsChanged =
+          JSON.stringify(settings.ca_feed_groups || []) !== JSON.stringify(message.settings.ca_feed_groups || []);
         settings = { ...settings, ...message.settings };
         if (typeof WechatFeed !== "undefined") WechatFeed.setNumberFormat(settings.mcap_format);
         if (overlayChanged || floatChanged) applySurface();
         else paintAll();
         if (listenChanged) requestSnapshot(false);
+        if (listenChanged || caGroupsChanged) requestRecentCa();
       }
       if (message.type === "snapshot") {
         snapshotPending = false;
@@ -1216,10 +1509,15 @@
           requestSnapshot(true);
         }
       }
+      if (message.type === "recentCa") {
+        for (const card of message.cards || []) rememberCa(card);
+        paintAll();
+      }
       if (message.type === "message") remember(message.card);
       if (message.type === "patch" && message.card) remember(message.card);
       if (message.type === "cleared") {
         cards.clear();
+        caCards.clear();
         paintAll();
       }
     });
@@ -1233,6 +1531,7 @@
       }
     });
     requestSnapshot(false);
+    requestRecentCa();
   }
 
   function disconnect() {
@@ -1287,6 +1586,14 @@
 
   chrome.storage.onChanged.addListener((changes, area) => {
     if (!extensionAlive() || area !== "local") return;
+    // 别的标签页看过最近 CA，这里的角标跟着清。
+    if (changes.recentCaSeen) {
+      const seen = Number(changes.recentCaSeen.newValue) || 0;
+      if (seen > recentSeen) {
+        recentSeen = seen;
+        if (floatHost) paintRecent(floatHost);
+      }
+    }
     const stored = {};
     if (changes.settings) stored.settings = changes.settings.newValue;
     if (changes.gmgnOverlay) stored.gmgnOverlay = changes.gmgnOverlay.newValue;
@@ -1306,7 +1613,17 @@
 
   async function boot() {
     try {
-      const stored = await chrome.storage.local.get(["gmgnOverlay", "floatPanel", "caOnly", "settings", "floatSites"]);
+      const stored = await chrome.storage.local.get([
+        "gmgnOverlay",
+        "floatPanel",
+        "caOnly",
+        "settings",
+        "floatSites",
+        "recentCaSeen",
+      ]);
+      // 第一次用时把「已读线」定在现在，免得一打开就是 10 条未读。
+      recentSeen = Number(stored.recentCaSeen) || Math.floor(Date.now() / 1000);
+      if (!stored.recentCaSeen) chrome.storage.local.set({ recentCaSeen: recentSeen });
       applyStored(stored);
       applySurface();
     } catch (error) {

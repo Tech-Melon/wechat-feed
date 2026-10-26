@@ -319,6 +319,14 @@ chrome.runtime.onConnect.addListener((port) => {
             });
           });
       }
+      // 最近 CA 面板：按「只看 CA」的群来源由后端过滤，与主列表分页互不影响。
+      if (message?.type === "recentCa") {
+        const params = new URLSearchParams({ limit: "80", ca_only: "true" });
+        fetch(`${API}/api/messages?${params}`)
+          .then((response) => response.json())
+          .then((body) => port.postMessage({ type: "recentCa", cards: body.messages || [] }))
+          .catch(() => port.postMessage({ type: "recentCa", cards: [] }));
+      }
     });
   }
   startStream();

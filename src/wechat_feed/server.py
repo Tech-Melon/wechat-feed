@@ -291,7 +291,7 @@ def create_app() -> FastAPI:
         persist.prune()
         cas.prune()
         for card in persist.token_cards():
-            cas.remember(card, list(card.get("tokenCards") or []))
+            cas.remember(card, list(card.get("tokenCards") or []), with_stats=False)
         dropped = cas.prune_bad()
         if dropped:
             logger.info("已丢弃异常历史 CA {} 条", dropped)
