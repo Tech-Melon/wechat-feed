@@ -252,25 +252,46 @@
   }
 
   // 规避分隔符只在 URL 片段里还原成 `.` / `:` / `/`，避免「这一点」误伤。
-  const URL_DOT = String.raw`[.\u00B7\u2024\u2027\u30FB\uFF0E\u3002点點丶‧]`;
+  const URL_SOFT_CHARS = String.raw`\u00B7\u2024\u2027\u30FB\uFF0E\u3002点點丶‧`;
+  // [.] (.) （.） 【.】 这类括号点，括号里也可以是中文点。
+  const URL_BRACKET_DOT = String.raw`[\[(（【]\s*[.${URL_SOFT_CHARS}]\s*[\])）】]`;
+  // 中文点 / 括号点：明显是有意规避，裸域名带空格时只认这种。
+  const URL_SOFT_DOT = new RegExp(String.raw`[${URL_SOFT_CHARS}]|${URL_BRACKET_DOT}`);
+  const URL_DOT = String.raw`(?:[.${URL_SOFT_CHARS}]|${URL_BRACKET_DOT})`;
   const URL_GAP = String.raw`[\s\u00A0\u200B-\u200D\uFEFF\u3000]*`;
-  const URL_TLD = String.raw`(?:finance|online|website|exchange|market|space|store|cloud|tech|info|site|shop|blog|wiki|live|news|link|page|meme|cash|swap|nft|dao|fun|app|xyz|pro|dev|net|org|com|top|vip|club|biz|icu|wang|xin|gov|edu|mil|int|near|sol|eth|ton|defi|io|ai|cc|me|co|gg|cn|hk|tv|to|so|fi|uk|us)`;
+  // 只用于没写协议头的裸域名；写了 http(s) 的任意后缀都认。
+  const URL_TLD = String.raw`(?:finance|online|website|exchange|market|space|store|cloud|tech|info|site|shop|blog|wiki|live|news|link|page|meme|cash|swap|nft|dao|fun|app|xyz|pro|dev|net|org|com|top|vip|club|biz|icu|wang|xin|gov|edu|mil|int|near|sol|eth|ton|defi|io|ai|cc|me|co|gg|cn|hk|tv|to|fi|uk|us)`;
   const URL_SCHEME = String.raw`(?:https?|hxxps?)[:：]${URL_GAP}[/／]{0,2}`;
-  const URL_BODY = String.raw`[A-Za-z0-9\-._~:/?#@!$&*+,;=%|点點。．·・丶‧／：\[\]()（）【】]*`;
+  const URL_BODY = String.raw`[A-Za-z0-9\-._~:/?#@!$&*+,;=%|点點。．·・丶‧／：\[\]()]*`;
   const URL_LABEL = String.raw`[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?`;
   const URL_HOST = String.raw`${URL_LABEL}(?:${URL_GAP}${URL_DOT}${URL_GAP}${URL_LABEL})*${URL_GAP}${URL_DOT}${URL_GAP}${URL_TLD}`;
+  // 标准写法的域名，后缀不限（bit.ly、example.de）。
+  const URL_STRICT_HOST = String.raw`${URL_LABEL}(?:\.${URL_LABEL})*\.[A-Za-z]{2,24}`;
+  const URL_IP = String.raw`(?:\d{1,3}\.){3}\d{1,3}`;
+  // 域名到此为止：后面不能再接字母数字，也不能是「.字母」，避免 x.company 截成 x.com。
+  const URL_END = String.raw`(?![A-Za-z0-9-]|\.[A-Za-z0-9])`;
+  const URL_PORT = String.raw`(?::\d{1,5})?`;
   const URL_PATH = String.raw`(?:[/／?#]${URL_BODY})?`;
-  const URL_PATTERN = String.raw`(?:(?<![@A-Za-z0-9])${URL_SCHEME}${URL_GAP}(?:${URL_DOT}${URL_GAP})*${URL_HOST}${URL_PATH})|(?:(?<![@A-Za-z0-9])${URL_LABEL}(?:${URL_DOT}${URL_LABEL})*${URL_DOT}${URL_TLD}\b${URL_PATH})`;
-  const URL_TRAIL = /[),.;:!?，。、；：！？》>】\]"'`]+$/;
+  const URL_PATTERN = String.raw`(?:(?<![@A-Za-z0-9])${URL_SCHEME}${URL_GAP}(?:${URL_DOT}${URL_GAP})*(?:${URL_STRICT_HOST}|${URL_HOST}|${URL_IP}|localhost)${URL_END}${URL_PORT}${URL_PATH})|(?:(?<![@A-Za-z0-9])${URL_HOST}${URL_END}${URL_PATH})`;
+  const URL_TRAIL = /[.,;:!?'"`>》」』，。、；：！？…\u00B7\u2024\u2027\u30FB\uFF0E点點丶‧]+$/;
+  const URL_PAIRS = { ")": "(", "]": "[" };
+  const URL_BRACKET_DOT_RE = new RegExp(URL_BRACKET_DOT, "g");
+
+  // 全角字母数字转半角，长度不变，原文下标仍然对得上。
+  function toHalfWidth(value) {
+    return String(value ?? "").replace(/[\uFF10-\uFF19\uFF21-\uFF3A\uFF41-\uFF5A]/g, (ch) =>
+      String.fromCharCode(ch.charCodeAt(0) - 0xfee0),
+    );
+  }
 
   function restoreHref(raw) {
-    let text = String(raw || "").trim();
+    let text = toHalfWidth(raw).trim();
     if (!text) return "";
     text = text.replace(/[\u200B-\u200D\uFEFF]/g, "");
-    text = text.replace(/\[\s*\.\s*\]|\(\s*\.\s*\)|（\s*\.\s*）|【\s*\.\s*】/g, ".");
+    text = text.replace(URL_BRACKET_DOT_RE, ".");
     text = text.replace(/^hxxps/i, "https").replace(/^hxxp/i, "http");
     text = text.replace(/^(https?)[:：][\s\u00A0\u3000]*[/／]*/i, "$1://");
-    text = text.replace(/[点點。．·・丶‧]/g, ".");
+    text = text.replace(/[\u00B7\u2024\u2027\u30FB\uFF0E\u3002点點丶‧]/g, ".");
     text = text.replace(/[\s\u00A0\u3000]*\.[\s\u00A0\u3000]*/g, ".");
     text = text.replace(/^(https?:\/\/)[\s\u00A0\u3000]+/i, "$1");
     text = text.replace(/^(https?:\/\/)\.+/i, "$1");
@@ -291,10 +312,27 @@
     }
   }
 
+  // 裁掉句末标点；右括号只在没有配对左括号时才裁，保留 wiki/Foo_(bar) 这种路径。
   function trimUrlToken(raw) {
     let text = String(raw || "");
-    while (text && URL_TRAIL.test(text)) text = text.replace(URL_TRAIL, "");
-    return text;
+    const count = (ch) => text.split(ch).length - 1;
+    for (;;) {
+      const before = text;
+      text = text.replace(URL_TRAIL, "").replace(/[([]+$/, "");
+      const tail = text.slice(-1);
+      const open = URL_PAIRS[tail];
+      if (open && count(open) < count(tail)) text = text.slice(0, -1);
+      if (text === before) return text;
+    }
+  }
+
+  // 没写协议头、点两边又有空格时，必须是中文点 / 括号点或带路径，避免「ok . io」这种句子误伤。
+  function looseUrlOk(token) {
+    if (/^(?:https?|hxxps?)[:：]/i.test(token)) return true;
+    const host = token.split(/[/／?#]/)[0];
+    const spaced = host.replace(URL_BRACKET_DOT_RE, ".");
+    if (!/[\s\u00A0\u200B-\u200D\uFEFF\u3000]/.test(spaced)) return true;
+    return URL_SOFT_DOT.test(host) || host.length < token.length;
   }
 
   function webLink(raw, href) {
@@ -318,12 +356,14 @@
     const caRe = new RegExp([...extra, CA_PATTERN].join("|"), "g");
     const urlRe = new RegExp(URL_PATTERN, "gi");
     const marks = [];
-    for (const match of source.matchAll(urlRe)) {
-      const raw = trimUrlToken(match[0]);
-      if (!raw) continue;
-      const href = restoreHref(raw);
+    // 在半角副本上找链接，显示仍取原文。
+    for (const match of toHalfWidth(source).matchAll(urlRe)) {
+      const token = trimUrlToken(match[0]);
+      if (!token || !looseUrlOk(token)) continue;
+      const href = restoreHref(token);
       if (!href) continue;
-      marks.push({ start: match.index, end: match.index + raw.length, kind: "url", raw, href });
+      const end = match.index + token.length;
+      marks.push({ start: match.index, end, kind: "url", raw: source.slice(match.index, end), href });
     }
     for (const match of source.matchAll(caRe)) {
       marks.push({
