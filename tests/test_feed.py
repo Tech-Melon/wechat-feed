@@ -2213,3 +2213,39 @@ def test_board_skips_big_cap_and_unknown_tokens(tmp_path: Path) -> None:
     assert calls["BIG"]["status"] == "excluded" and calls["BIG"]["excluded"] == "bigcap"
     assert calls["?"]["excluded"] == "unknown" and not calls["?"]["win"]
     assert store.caller_stats_map(fresh=True)["wxid_z"]["calls"] == 1
+
+
+def test_watched_tokens_jump_refresh_queue(tmp_path: Path) -> None:
+    # 浮窗正在看的币排到后台刷新最前；同一个币 60 秒内不重复刷；quotes 只读本地库。
+    from wechat_feed.castore import URGENT_MIN_AGE, URGENT_TTL
+
+    store = CaStore(tmp_path / "ca.db")
+    now = 1_800_000_000
+    hot = "0x" + "a1" * 20
+    watched = "0x" + "a2" * 20
+    for card, addr, at in (("w1", hot, now - 600), ("w2", watched, now - 2 * 86400)):
+        store.remember(
+            _call_card(card, "wxid_w", at),
+            [{"address": addr, "chain": "bsc", "symbol": "T", "marketCap": 1000}],
+        )
+    # 都已首结算、刚刷过：正常分层下谁都不到期。
+    store._conn.execute("UPDATE ca_calls SET settled = 1")
+    store._conn.execute("UPDATE ca_group_firsts SET settled = 1")
+    store._conn.execute("UPDATE ca_tokens SET refreshed_at = ?", (now - URGENT_MIN_AGE - 1,))
+    store._conn.commit()
+    assert store.next_due(now) is None
+    assert store.watch([{"chain": "BSC", "address": watched.upper().replace("0X", "0x")}], now) == 1
+    due = store.next_due(now)
+    assert due is not None and due["address"] == watched
+    store.mark_attempt("bsc", watched, now)
+    assert store.next_due(now + 10) is None
+    # 页面不再续期，过期后撤销加急。
+    store._conn.execute("UPDATE ca_tokens SET refreshed_at = ?", (now - 3600,))
+    store._conn.commit()
+    assert store.next_due(now + URGENT_TTL + 1) is None or (
+        store.next_due(now + URGENT_TTL + 1)["address"] != watched
+    )
+    store.apply_quote("bsc", hot, {"marketCap": 2500, "priceUsd": 1.0})
+    quote = {q["address"]: q for q in store.quotes([{"chain": "bsc", "address": hot}])}[hot]
+    assert quote["marketCap"] == 2500 and quote["firstMcap"] == 1000
+    assert quote["nowX"] == 2.5 and quote["refreshedAt"] > 0

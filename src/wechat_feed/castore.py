@@ -41,6 +41,12 @@ FINAL_AGE = 7 * 86400
 BOARD_CACHE_TTL = 30
 # 卡片上「喊单人胜率」的缓存：每条新喊单都会写库，这里至少复用 5 秒，免得逐条重算整张榜。
 CALLER_STATS_MIN_AGE = 5
+# 浮窗「最近 CA」正在看的币加急刷新：同一个币最快 60 秒刷一次（K 线权重 3）。
+# 面板 10 个 + 顶部 1 个最多 33 权重/分钟（约 0.55/秒），免费档上限 5/秒，
+# 实测平时后台约 0.1/秒、峰值 4，加上去仍远低于限频；页面不再续期 90 秒后自动撤销。
+URGENT_MIN_AGE = 60
+URGENT_TTL = 90
+URGENT_MAX = 20
 # 超过 24 小时没人再喊、且现市值低于 1.5 万的币暂停拉 K 线，下次被喊到再恢复。
 DORMANT_AGE = 24 * 3600
 DORMANT_MCAP = 15_000.0
@@ -144,6 +150,8 @@ class CaStore:
         # 每次写库加一，榜单/统计缓存据此判断是否失效。
         self._version = 0
         self._cache: dict[str, tuple[int, float, Any]] = {}
+        # 页面正在看的币 → 加急到期时间（只在内存里，重启即清）。
+        self._urgent: dict[tuple[str, str], float] = {}
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(str(path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
@@ -1169,6 +1177,9 @@ class CaStore:
             ).fetchone()
             if row is not None:
                 return dict(row)
+            row = self._urgent_due(cols, base, stamp)
+            if row is not None:
+                return row
             bands = (
                 (stamp - HOT_AGE, stamp + 1, stamp - REFRESH_HOT),
                 (stamp - WARM_AGE, stamp - HOT_AGE, stamp - REFRESH_WARM),
@@ -1190,6 +1201,83 @@ class CaStore:
                 if row is not None:
                     return dict(row)
         return None
+
+    def _urgent_due(self, cols: str, base: str, stamp: int) -> dict[str, Any] | None:
+        """加急队列里最久没刷的那个（满 60 秒才算到期）。调用方已持锁。"""
+        for key in [key for key, until in self._urgent.items() if until <= stamp]:
+            del self._urgent[key]
+        if not self._urgent:
+            return None
+        keys = list(self._urgent)
+        marks = ",".join("(?, ?)" for _ in keys)
+        row = self._conn.execute(
+            f"""
+            SELECT {cols} FROM ca_tokens t
+            WHERE {base} AND (t.chain, t.address) IN (VALUES {marks})
+              AND t.refreshed_at < ?
+            ORDER BY t.refreshed_at ASC LIMIT 1
+            """,
+            (*[part for key in keys for part in key], stamp - URGENT_MIN_AGE),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def watch(self, items: list[dict[str, Any]], now: int | None = None) -> int:
+        """页面正在看这些币：加急 90 秒，到期前页面会续期。返回登记的个数。"""
+        stamp = int(now or time.time())
+        keys = self._keys(items)[:URGENT_MAX]
+        with self._lock:
+            for key in keys:
+                self._urgent[key] = stamp + URGENT_TTL
+            # 防止页面异常时无限堆积：只留最近登记的 URGENT_MAX 个。
+            while len(self._urgent) > URGENT_MAX:
+                del self._urgent[min(self._urgent, key=self._urgent.__getitem__)]
+        return len(keys)
+
+    @staticmethod
+    def _keys(items: list[dict[str, Any]]) -> list[tuple[str, str]]:
+        keys: list[tuple[str, str]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            key = (_text(item.get("chain")).lower() or "_", _addr(item.get("address")))
+            if key[1] and key not in keys:
+                keys.append(key)
+        return keys
+
+    def quotes(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """本地库里这些币的最新市值、首喊市值与倍数（不打 GMGN）。"""
+        keys = self._keys(items)[:URGENT_MAX]
+        if not keys:
+            return []
+        marks = ",".join("(?, ?)" for _ in keys)
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT chain, address, first_mcap, ath_mcap, last_mcap, refreshed_at
+                FROM ca_tokens WHERE (chain, address) IN (VALUES {marks})
+                """,
+                [part for key in keys for part in key],
+            ).fetchall()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            first = _num(row["first_mcap"])
+            last = _num(row["last_mcap"])
+            peak = max(_num(row["ath_mcap"]), last)
+            if not is_sane(first, peak, last):
+                continue
+            out.append(
+                {
+                    "chain": _text(row["chain"]),
+                    "address": _text(row["address"]),
+                    "marketCap": last,
+                    "firstMcap": first,
+                    "athMarketCap": peak,
+                    "nowX": last / first if last > 0 else 0.0,
+                    "maxX": peak / first if peak > 0 else 0.0,
+                    "refreshedAt": int(row["refreshed_at"] or 0),
+                }
+            )
+        return out
 
     def plan_anchors(self, chain: str, address: str) -> list[int]:
         """这次刷新要拉的锚点：水位线 + 至多 3 条未结算喊单的时间。

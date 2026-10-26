@@ -502,6 +502,17 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       .catch((error) => sendResponse({ ok: false, detail: String(error?.message || error) }));
     return true;
   }
+  if (message?.type === "caQuotes" && Array.isArray(message.items)) {
+    fetch(`${API}/api/ca-quotes`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ items: message.items.slice(0, 20), watch: Boolean(message.watch) }),
+    })
+      .then((response) => response.json())
+      .then((body) => sendResponse({ ok: true, quotes: body.quotes || [] }))
+      .catch(() => sendResponse({ ok: false, quotes: [] }));
+    return true;
+  }
   if (message?.type === "proxyDataUrl" && message.url) {
     proxyCached(String(message.url))
       .then((dataUrl) => sendResponse({ ok: true, dataUrl }))

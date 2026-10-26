@@ -788,6 +788,22 @@ def create_app() -> FastAPI:
             "stats": cas.stats(),
         }
 
+    @app.post("/api/ca-quotes")
+    async def ca_quotes(request: Request) -> dict[str, Any]:
+        """浮窗「最近 CA」：读本地最新市值；watch=true 时把这些币排进后台加急刷新。"""
+        try:
+            body = await request.json()
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail="请求不是合法 JSON") from exc
+        items = body.get("items") if isinstance(body, dict) else None
+        if not isinstance(items, list):
+            raise HTTPException(status_code=400, detail="items 必须是数组")
+        items = [item for item in items[:20] if isinstance(item, dict)]
+        if body.get("watch") and store.get().get("ca_board", True):
+            cas.watch(items)
+        quotes = await asyncio.to_thread(cas.quotes, items)
+        return {"ok": True, "quotes": quotes, "now": int(time.time())}
+
     @app.get("/api/gmgn-stats")
     def gmgn_stats() -> dict[str, Any]:
         """GMGN 调用计量：最近 1 小时实时面板（不含 Key 与请求参数）。"""

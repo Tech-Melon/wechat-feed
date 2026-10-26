@@ -14,6 +14,13 @@
   const RECENT_LIMIT = 10;
   let recentSeen = 0;
   let recentTop = "";
+  // 最近 CA 的最新市值（本地库，不打 GMGN）：面板开着每 10 秒读一次并加急后台刷新，
+  // 只有顶部一行时 30 秒一次。后台同一个币最快 60 秒刷一次，额度见 castore.URGENT_MIN_AGE。
+  const quotes = new Map();
+  const QUOTE_OPEN_MS = 10_000;
+  const QUOTE_BAR_MS = 30_000;
+  let quoteTimer = 0;
+  let quoteBusy = false;
   let settings = {
     gmgn_overlay: false,
     float_panel: false,
@@ -716,6 +723,10 @@
       .rc-item .rc-sym { max-width:120px; font-size:15px; }
       .rc-item .wf-chain { flex:none; }
       .rc-sub2 { font-size:12px; }
+      .rc-age { flex:none; margin-left:auto; color:#079455; font-size:11px; }
+      .rc-age.is-stale { color:var(--muted); }
+      :host([data-theme="dark"]) .rc-age { color:#75e0a7; }
+      :host([data-theme="dark"]) .rc-age.is-stale { color:var(--muted); }
       .rc-name { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--muted); }
       .rc-metrics { display:grid; grid-template-columns:repeat(4, minmax(0,1fr)); gap:4px; }
       .rc-m { display:grid; gap:1px; padding:5px 7px; border-radius:8px; background:color-mix(in srgb, var(--ink) 4%, transparent); min-width:0; }
@@ -1055,13 +1066,76 @@
 
   // ---- 最近 CA ----
 
+  function quoteTarget(entry) {
+    const token = entry.token || {};
+    const chain = String(token.chain || "").toLowerCase();
+    const address = token.address || entry.address;
+    return chain && address ? { chain, address } : null;
+  }
+
+  function quoteKey(target) {
+    return `${target.chain}|${WechatFeed.caKey(target.address)}`;
+  }
+
   function recentEntries() {
     if (typeof WechatFeed === "undefined" || !WechatFeed.recentCaEntries) return [];
-    return WechatFeed.recentCaEntries(Array.from(caCards.values()), settings, RECENT_LIMIT).map((entry) => ({
-      ...entry,
-      card: present(entry.card),
-    }));
+    return WechatFeed.recentCaEntries(Array.from(caCards.values()), settings, RECENT_LIMIT).map((entry) => {
+      const next = { ...entry, card: present(entry.card) };
+      const target = quoteTarget(entry);
+      const quote = target && quotes.get(quoteKey(target));
+      // 本地库里的最新市值覆盖消息里的快照；倍数口径不变（相对所有群首发市值）。
+      if (quote && quote.marketCap > 0) {
+        next.token = {
+          ...entry.token,
+          marketCap: quote.marketCap,
+          firstMcap: quote.firstMcap,
+          athMarketCap: quote.athMarketCap,
+          nowX: quote.nowX,
+          maxX: quote.maxX,
+        };
+        next.quotedAt = quote.refreshedAt;
+      }
+      return next;
+    });
   }
+
+  function scheduleQuotes(delay) {
+    clearTimeout(quoteTimer);
+    quoteTimer = setTimeout(pollQuotes, delay);
+  }
+
+  async function pollQuotes() {
+    const host = floatHost;
+    if (!host || !host._rcBar || !extensionAlive()) return;
+    const open = !host._rcPanel.hidden;
+    const next = open ? QUOTE_OPEN_MS : QUOTE_BAR_MS;
+    // 标签页在后台或已经在请求中：不看就不刷，回到前台由 visibilitychange 立即补一次。
+    if (document.hidden || quoteBusy) {
+      scheduleQuotes(next);
+      return;
+    }
+    const entries = recentEntries();
+    const targets = (open ? entries : entries.slice(0, 1)).map(quoteTarget).filter(Boolean);
+    if (!targets.length) {
+      scheduleQuotes(next);
+      return;
+    }
+    quoteBusy = true;
+    try {
+      const result = await send("caQuotes", { items: targets, watch: true });
+      for (const quote of result?.quotes || []) {
+        quotes.set(quoteKey({ chain: String(quote.chain || "").toLowerCase(), address: quote.address }), quote);
+      }
+      if (result?.quotes?.length && floatHost === host) paintRecent(host);
+    } finally {
+      quoteBusy = false;
+      if (floatHost === host) scheduleQuotes(next);
+    }
+  }
+
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && floatHost && floatHost._rcBar) scheduleQuotes(0);
+  });
 
   function markRecentSeen(entries) {
     const latest = entries.reduce((max, entry) => Math.max(max, Number(entry.card.createTime) || 0), 0);
@@ -1134,6 +1208,8 @@
     }
     host._rcBtn.classList.toggle("on", open);
     paintRecent(host);
+    // 打开面板立刻读一次并加急；关上后退回只刷顶部一行的节奏。
+    scheduleQuotes(open ? 0 : QUOTE_BAR_MS);
   }
 
   function flashButton(button, text) {
@@ -1220,6 +1296,8 @@
     document.addEventListener("mousedown", outside, true);
     document.addEventListener("keydown", onKey, true);
     paintRecent(host);
+    // 等首屏最近 CA 拉回来再读市值。
+    scheduleQuotes(3000);
   }
 
   async function mountFloat() {

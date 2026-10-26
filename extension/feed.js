@@ -1492,6 +1492,18 @@
     return `<span class="rc-chain" title="${escapeText(meta ? meta.label : String(chain))}">${icon}</span>`;
   }
 
+  // 市值新鲜度：按分钟粒度变化，面板每 10 秒刷新也不会每次都重建节点。
+  function quoteAgeText(entry, nowSec) {
+    const at = Number(entry.quotedAt) || 0;
+    if (!at) return "市值为发言时";
+    const now = Number.isFinite(Number(nowSec)) ? Number(nowSec) : Date.now() / 1000;
+    const delta = Math.max(0, Math.floor(now - at));
+    if (delta < 90) return "市值刚更新";
+    if (delta < 3600) return `市值 ${Math.round(delta / 60)} 分钟前`;
+    if (delta < 86400) return `市值 ${Math.floor(delta / 3600)} 小时前`;
+    return `市值 ${Math.floor(delta / 86400)} 天前`;
+  }
+
   function clockText(seconds) {
     return formatTime(seconds).split(":").slice(0, 2).join(":");
   }
@@ -1502,7 +1514,7 @@
     const card = entry.card;
     const name = card.displayName || card.senderName || "群成员";
     const cap = moneyHtml(token.marketCap, token.marketCapText || "");
-    return `<div class="rc-tick" data-recent-open title="最新 CA · 点开看最近 10 条">
+    return `<div class="rc-tick" data-recent-open title="最新 CA · ${escapeText(quoteAgeText(entry))} · 点开看最近 10 条">
       ${recentChainHtml(entry.chain)}
       ${recentLogo(entry, 18)}
       <strong class="rc-sym">${escapeText(recentSymbol(entry))}</strong>
@@ -1585,6 +1597,7 @@
           <div class="rc-row rc-sub2">
             ${fullName ? `<span class="rc-name">${escapeText(clipText(fullName, 14))}</span>` : ""}
             <code class="rc-addr" title="${address}">${escapeText(shortAddress(entry.address))}</code>
+            <span class="rc-age${entry.quotedAt ? "" : " is-stale"}">${escapeText(quoteAgeText(entry))}</span>
           </div>
         </div>
       </div>
