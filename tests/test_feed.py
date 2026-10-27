@@ -2249,3 +2249,22 @@ def test_watched_tokens_jump_refresh_queue(tmp_path: Path) -> None:
     quote = {q["address"]: q for q in store.quotes([{"chain": "bsc", "address": hot}])}[hot]
     assert quote["marketCap"] == 2500 and quote["firstMcap"] == 1000
     assert quote["nowX"] == 2.5 and quote["refreshedAt"] > 0
+
+
+def test_injected_scroll_containers_have_opaque_background() -> None:
+    # 注入宿主页面的滚动容器必须有不透明背景：1 倍屏上 Chrome 不给透明背景的滚动容器
+    # 做合成线程滚动，每帧主线程重绘，宿主页面一忙就卡（0.9.30 的 .list、0.9.36 的 .rc-list）。
+    import re
+
+    rule = re.compile(r"([^{}]+)\{([^{}]*)\}")
+    scrolls = re.compile(r"overflow(?:-y)?\s*:\s*(?:auto|scroll)")
+    opaque = re.compile(
+        r"background(?:-color)?\s*:\s*(?!transparent|none|rgba\([^)]*,\s*0?\.\d|inherit)"
+    )
+    bad = []
+    for name in ("content.js", "feed.js"):
+        text = (ROOT / "extension" / name).read_text(encoding="utf-8")
+        for selector, body in rule.findall(text):
+            if scrolls.search(body) and not opaque.search(body):
+                bad.append(f"{name}: {selector.strip().splitlines()[-1]}")
+    assert not bad, "滚动容器缺不透明背景（见 docs/开发规范.md）：" + "；".join(bad)

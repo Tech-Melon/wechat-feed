@@ -131,6 +131,7 @@ uv run pytest -q
 uv run ruff check src tests scripts
 ```
 
+- 改插件和网页前先看 [开发规范](docs/开发规范.md)：注入页面的滚动容器必须有不透明背景、列表用增量更新、新增 GMGN 调用先算额度。
 - 本地页和插件共用 `extension/feed.js`，本地页通过 `/shared/feed.js` 读同一个文件。
 - 改完插件代码后到 `chrome://extensions` 点「重新加载」；改完后端代码执行 `wechat-feed.cmd restart`。
 - `scripts/direct_e2e.py`：在 8799 端口起临时实例，上游指向不存在的端口，验证关掉 WDA 后仍能工作，并测内存和 CPU。
@@ -138,6 +139,7 @@ uv run ruff check src tests scripts
 - `scripts/package.py`：检查版本号一致后生成 `dist/wechat-feed-<版本>.zip`。
 - `scripts/make_sounds.py`：重新生成内置提示音。
 - `scripts/make_icon.py`：重新生成产品图标（`web/favicon.*`、`extension/icon.*`）。
+- `scripts/scroll_float.py`、`scripts/scroll_recent.py`：在 1 倍屏下测浮窗 / 最近 CA 面板滚动是否走合成线程，用法见 [开发规范](docs/开发规范.md#4-怎么验证)。
 - 一次性的调试/探测脚本放 `.scratch/`（已在 `.gitignore`），不要堆在根目录。
 
 ## 插件自测清单

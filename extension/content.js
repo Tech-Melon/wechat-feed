@@ -713,7 +713,8 @@
       .rc-head { display:flex; align-items:baseline; gap:8px; padding:8px 10px; border-bottom:1px solid var(--line); }
       .rc-head strong { font-size:13px; }
       .rc-sub { color:var(--muted); font-size:11px; }
-      .rc-list { flex:1 1 auto; min-height:0; overflow:auto; overscroll-behavior:contain; padding:6px; display:flex; flex-direction:column; gap:8px; }
+      /* 和 .list 同理：滚动容器背景必须不透明，否则 1 倍屏上整块走主线程重绘滚动 */
+      .rc-list { background:var(--card); flex:1 1 auto; min-height:0; overflow:auto; overscroll-behavior:contain; padding:6px; display:flex; flex-direction:column; gap:8px; }
       .rc-list .empty { padding:18px 8px; text-align:center; color:var(--muted); }
       .rc-item { padding:10px; border:1px solid var(--line); border-left:3px solid #e5484d; border-radius:12px; display:grid; gap:8px; }
       .rc-item.is-unread { background:color-mix(in srgb, #e5484d 5%, var(--card)); }
