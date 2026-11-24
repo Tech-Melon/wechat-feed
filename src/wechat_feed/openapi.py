@@ -31,7 +31,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from loguru import logger
 
-from .config import OPEN_PLATFORM, OPEN_RAW_ID, SettingsStore
+from .config import GROUP_LIMIT, OPEN_PLATFORM, OPEN_RAW_ID, SettingsStore
 from .hub import Hub
 from .opendir import OpenDirectory, image_ref
 from .store import KEEP_SECONDS
@@ -355,12 +355,14 @@ class OpenIntake:
         tokens: TokenIndex,
         directory: OpenDirectory,
         maxsize: int = QUEUE_MAX,
+        on_settings: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.store = store
         self.hub = hub
         self.tokens = tokens
         self.directory = directory
         self.maxsize = maxsize
+        self.on_settings = on_settings
         self.queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._pending: set[str] = set()
         self.stats: dict[str, Any] = {
@@ -392,6 +394,8 @@ class OpenIntake:
         if len(messages) > MAX_BATCH:
             raise HTTPException(status_code=413, detail=f"每次最多 {MAX_BATCH} 条")
         settings = self.store.get()
+        if platform in (settings.get("open_auto_watch") or []):
+            settings = self._auto_watch(platform, messages, settings)
         watched = {str(item.get("id") or "") for item in settings.get("groups") or []}
         now = time.time()
         results: list[dict[str, Any]] = []
@@ -446,6 +450,50 @@ class OpenIntake:
             "queue": self.queue.qsize(),
             "results": results,
         }
+
+    def _auto_watch(
+        self, platform: str, messages: list[Any], settings: dict[str, Any]
+    ) -> dict[str, Any]:
+        """这个平台开了自动监控：从没见过的新群直接加进监控群。见过的（包括被移除的）不动。"""
+        fresh: dict[str, str] = {}
+        for item in messages:
+            chat = item.get("chat") if isinstance(item, dict) else None
+            if not isinstance(chat, dict):
+                continue
+            try:
+                chat_id = f"{platform}:{_raw_id(chat.get('id'), 'chat.id')}"
+                name = _clean_text(chat.get("name"), MAX_CHAT_NAME)
+            except Rejected:
+                continue
+            fresh.setdefault(chat_id, name)
+        groups = list(settings.get("groups") or [])
+        watched = {str(item.get("id") or "") for item in groups}
+        candidates = [chat_id for chat_id in fresh if chat_id not in watched]
+        if not candidates:
+            return settings
+        known = self.directory.known(candidates)
+        added = [chat_id for chat_id in candidates if chat_id not in known]
+        room = max(0, GROUP_LIMIT - len(groups))
+        if not added or not room:
+            if added:
+                logger.warning(
+                    "开放接口自动监控：监控群已满 {} 个，{} 没有加入，腾出名额后请手动加",
+                    GROUP_LIMIT,
+                    ", ".join(added),
+                )
+            return settings
+        added = added[:room]
+        groups.extend({"id": chat_id, "name": fresh[chat_id]} for chat_id in added)
+        try:
+            updated = self.store.replace({"groups": groups})
+        except ValueError as exc:
+            logger.warning("开放接口自动监控失败: {}", exc)
+            return settings
+        self.directory.remember_chats(platform, {chat_id: fresh[chat_id] for chat_id in added})
+        logger.info("开放接口自动监控 {} 个新群（{}）", len(added), platform)
+        if self.on_settings is not None:
+            self.on_settings(updated)
+        return updated
 
     def _publish(self, card: dict[str, Any]) -> None:
         card_id = str(card["id"])

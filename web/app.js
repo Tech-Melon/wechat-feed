@@ -220,6 +220,12 @@ function memberHaystack(member) {
 
 function renderMemberPanel(panel, groupId, members) {
   panel.replaceChildren();
+  if (window.WechatFeed.isOpenId(groupId)) {
+    const tip = document.createElement("p");
+    tip.className = "hint";
+    tip.textContent = "开放接口的群拿不到完整成员表，这里列的是推送过消息的人。";
+    panel.append(tip);
+  }
   const users = window.WechatFeed.groupListenUsers(state.settings, groupId);
   const partial = users !== null;
   const mode = document.createElement("div");
@@ -416,6 +422,20 @@ function headCheck(storedKey, title) {
   return label;
 }
 
+function groupSectionHead(section) {
+  const row = document.createElement("div");
+  row.className = "group-section";
+  const chip = section.open
+    ? window.WechatFeed.platformChip(section.items[0].id)
+    : Object.assign(document.createElement("span"), { className: "wf-plat is-wechat", textContent: "微" });
+  const title = document.createElement("strong");
+  title.textContent = section.name;
+  const count = document.createElement("small");
+  count.textContent = `${section.items.length} 个群`;
+  row.append(chip, title, count);
+  return row;
+}
+
 function fillGroupTable(box) {
   if (!box) return;
   const top = box.scrollTop;
@@ -435,82 +455,93 @@ function fillGroupTable(box) {
   head.append(headName, headCheck("all_feed_groups", "全部消息"), headCheck("ca_feed_groups", "只看 CA"), tail);
   box.append(head);
 
-  let shown = 0;
-  for (const item of state.settings.groups || []) {
-    if ((state.settings.blocked_groups || []).includes(item.id)) continue;
+  const visible = (state.settings.groups || []).filter((item) => {
+    if ((state.settings.blocked_groups || []).includes(item.id)) return false;
     const name = groupLabel(item.id, item.name);
-    if (needle && !`${name} ${item.name || ""} ${item.id}`.toLowerCase().includes(needle)) continue;
-    shown += 1;
-    const wrap = document.createElement("div");
-    wrap.className = "group-item";
-    const row = document.createElement("div");
-    row.className = "group-row";
-    const label = document.createElement("span");
-    label.className = "group-name";
-    label.textContent = name;
-    label.title = `${item.id} · 双击改备注`;
-    label.addEventListener("dblclick", (event) => {
-      event.preventDefault();
-      remarkGroup(item.id, name);
-    });
-    const cell = (storedKey, picked, title) => {
-      const holder = document.createElement("label");
-      holder.className = "group-check";
-      holder.title = title;
-      const check = document.createElement("input");
-      check.type = "checkbox";
-      check.checked = picked.has(item.id);
-      check.addEventListener("change", () => toggleFeedGroup(storedKey, item.id));
-      holder.append(check);
-      return holder;
-    };
-    const listen = window.WechatFeed.groupListenUsers(state.settings, item.id);
-    const membersBtn = document.createElement("button");
-    membersBtn.type = "button";
-    membersBtn.className = "group-members";
-    membersBtn.textContent = listen === null ? "成员" : `${listen.length}人`;
-    membersBtn.title = listen === null ? "查看成员、星标、屏蔽、只听部分人" : "正在只听部分用户";
-    membersBtn.addEventListener("click", () => {
-      if (expandedGroups.has(item.id)) expandedGroups.delete(item.id);
-      else expandedGroups.add(item.id);
-      renderGroups();
-    });
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "group-remove";
-    remove.textContent = "移除";
-    remove.title = "停止监控这个群";
-    remove.addEventListener("click", () => {
-      removeGroup(item.id).catch((error) => setNotice(error.message));
-    });
-    const actions = document.createElement("span");
-    actions.className = "group-tail";
-    actions.append(membersBtn, remove);
-    row.classList.toggle("is-open", expandedGroups.has(item.id));
-    row.append(
-      label,
-      cell("all_feed_groups", pickedAll, "在「全部消息」里显示这个群"),
-      cell("ca_feed_groups", pickedCa, "在「只看 CA」里显示这个群"),
-      actions,
-    );
-    wrap.append(row);
-    if (expandedGroups.has(item.id)) {
-      const panel = document.createElement("div");
-      panel.className = "member-panel";
-      const cached = memberCache.get(item.id);
-      if (cached && Date.now() - cached.at < 15000) {
-        renderMemberPanel(panel, item.id, cached.members);
-      } else {
-        panel.textContent = "正在读取成员…";
-        ensureMembers(item.id)
-          .then(() => renderGroups())
-          .catch((error) => {
-            panel.textContent = error.message;
-          });
+    return !needle || `${name} ${item.name || ""} ${item.id}`.toLowerCase().includes(needle);
+  });
+  const sections = window.WechatFeed.groupSections(visible);
+  // 只有微信群时不加分段标题，和以前一样；有开放接口的群才按来源分开。
+  const titled = sections.some((section) => section.open);
+  let shown = 0;
+  for (const section of sections) {
+    if (titled) box.append(groupSectionHead(section));
+    for (const item of section.items) {
+      const name = groupLabel(item.id, item.name);
+      shown += 1;
+      const wrap = document.createElement("div");
+      wrap.className = "group-item";
+      const row = document.createElement("div");
+      row.className = "group-row";
+      const label = document.createElement("span");
+      label.className = "group-name";
+      label.textContent = name;
+      const chip = window.WechatFeed.platformChip(item.id);
+      if (chip) label.prepend(chip);
+      label.title = `${item.id} · 双击改备注`;
+      label.addEventListener("dblclick", (event) => {
+        event.preventDefault();
+        remarkGroup(item.id, name);
+      });
+      const cell = (storedKey, picked, title) => {
+        const holder = document.createElement("label");
+        holder.className = "group-check";
+        holder.title = title;
+        const check = document.createElement("input");
+        check.type = "checkbox";
+        check.checked = picked.has(item.id);
+        check.addEventListener("change", () => toggleFeedGroup(storedKey, item.id));
+        holder.append(check);
+        return holder;
+      };
+      const listen = window.WechatFeed.groupListenUsers(state.settings, item.id);
+      const membersBtn = document.createElement("button");
+      membersBtn.type = "button";
+      membersBtn.className = "group-members";
+      membersBtn.textContent = listen === null ? "成员" : `${listen.length}人`;
+      membersBtn.title = listen === null ? "查看成员、星标、屏蔽、只听部分人" : "正在只听部分用户";
+      membersBtn.addEventListener("click", () => {
+        if (expandedGroups.has(item.id)) expandedGroups.delete(item.id);
+        else expandedGroups.add(item.id);
+        renderGroups();
+      });
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "group-remove";
+      remove.textContent = "移除";
+      remove.title = "停止监控这个群";
+      remove.addEventListener("click", () => {
+        removeGroup(item.id).catch((error) => setNotice(error.message));
+      });
+      const actions = document.createElement("span");
+      actions.className = "group-tail";
+      actions.append(membersBtn, remove);
+      row.classList.toggle("is-open", expandedGroups.has(item.id));
+      row.append(
+        label,
+        cell("all_feed_groups", pickedAll, "在「全部消息」里显示这个群"),
+        cell("ca_feed_groups", pickedCa, "在「只看 CA」里显示这个群"),
+        actions,
+      );
+      wrap.append(row);
+      if (expandedGroups.has(item.id)) {
+        const panel = document.createElement("div");
+        panel.className = "member-panel";
+        const cached = memberCache.get(item.id);
+        if (cached && Date.now() - cached.at < 15000) {
+          renderMemberPanel(panel, item.id, cached.members);
+        } else {
+          panel.textContent = "正在读取成员…";
+          ensureMembers(item.id)
+            .then(() => renderGroups())
+            .catch((error) => {
+              panel.textContent = error.message;
+            });
+        }
+        wrap.append(panel);
       }
-      wrap.append(panel);
+      box.append(wrap);
     }
-    box.append(wrap);
   }
   if (!shown) {
     const empty = document.createElement("p");
@@ -629,7 +660,6 @@ function renderDirectory() {
     check.checked = watched.has(group.id);
     const name = document.createElement("strong");
     name.textContent = groupLabel(group.id, group.name || "未命名群");
-    if (group.platformName) name.textContent = `[${group.platformName}] ${name.textContent}`;
     const id = document.createElement("span");
     id.textContent = group.id;
     label.title = group.name && group.name !== name.textContent ? group.name : group.id;
@@ -651,6 +681,51 @@ function renderDirectory() {
     hint.textContent = "没有匹配的群，换个关键字再筛。";
     directory.append(hint);
   }
+  renderOpenDirectory();
+}
+
+/** 开放接口推送过、还没加入监控的群。已监控的群出现在上面的表格里。 */
+function renderOpenDirectory() {
+  const box = document.querySelector("#open-directory");
+  const list = document.querySelector("#open-directory-list");
+  if (!box || !list) return;
+  const watched = new Set((state.settings.groups || []).map((item) => item.id));
+  const pending = (state.openChats || []).filter((chat) => !watched.has(chat.id));
+  box.hidden = !pending.length;
+  list.replaceChildren();
+  for (const section of window.WechatFeed.groupSections(pending)) {
+    for (const chat of section.items) {
+      const label = document.createElement("label");
+      const check = document.createElement("input");
+      check.type = "checkbox";
+      const name = document.createElement("strong");
+      const chip = window.WechatFeed.platformChip(chat.id);
+      if (chip) name.append(chip);
+      name.append(document.createTextNode(groupLabel(chat.id, chat.name || "未命名群")));
+      const meta = document.createElement("span");
+      meta.textContent = `${chat.id} · ${chat.messages || 0} 条推送`;
+      label.title = "勾选加入监控，之后推送的消息会显示在信息流里";
+      label.append(check, name, meta);
+      check.addEventListener("change", () => {
+        if (!check.checked) return;
+        addGroup(chat.id, chat.name).catch((error) => {
+          check.checked = false;
+          setNotice(error.message);
+        });
+      });
+      list.append(label);
+    }
+  }
+}
+
+async function loadOpenChats() {
+  try {
+    const payload = await readJson(await fetch("/api/open-api"));
+    state.openChats = payload.chats || [];
+  } catch (error) {
+    state.openChats = [];
+  }
+  renderOpenDirectory();
 }
 
 function mergeSettings(next) {
@@ -1469,6 +1544,7 @@ async function load() {
   render();
   // 榜单不依赖信息流，和首屏一起发，不用等首屏返回。
   loadBoard().catch(() => {});
+  loadOpenChats();
   await loadFeed({ reset: true, caOnly: Boolean(state.settings.ca_only) });
   loadFeed({ reset: true, caOnly: !state.settings.ca_only }).catch(() => {});
   if (window.WechatFeed.startFreshTick) window.WechatFeed.startFreshTick(document);
@@ -1535,8 +1611,13 @@ document.querySelector("#add-form").addEventListener("submit", async (event) => 
   }
 });
 
+document.querySelector("#fold-groups").addEventListener("toggle", (event) => {
+  if (event.target.open) loadOpenChats();
+});
+
 document.querySelector("#load-groups").addEventListener("click", async () => {
   setNotice("正在读取本机群列表");
+  loadOpenChats();
   try {
     const payload = await readJson(await fetch("/api/groups"));
     state.directory = payload.groups || [];
@@ -1553,10 +1634,9 @@ document.querySelector("#load-groups").addEventListener("click", async () => {
     }
     renderDirectory();
     setNotice(
-      payload.warning ||
-        (state.directory.length
-          ? "输入关键字筛选群。勾选加入监控，取消勾选即从监控里移除。"
-          : "没有读到群会话。"),
+      state.directory.length
+        ? "输入关键字筛选群。勾选加入监控，取消勾选即从监控里移除。"
+        : "没有读到微信群会话。",
     );
   } catch (error) {
     setNotice(error.message);

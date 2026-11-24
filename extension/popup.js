@@ -191,6 +191,12 @@ function applyListen(groupId, users) {
 
 function renderMemberPanel(panel, settings, groupId, members) {
   panel.replaceChildren();
+  if (window.WechatFeed.isOpenId(groupId)) {
+    const tip = document.createElement("p");
+    tip.className = "hint";
+    tip.textContent = "开放接口的群只列推送过消息的人。";
+    panel.append(tip);
+  }
   const users = window.WechatFeed.groupListenUsers(settings, groupId);
   const partial = users !== null;
   const mode = document.createElement("div");
@@ -338,6 +344,20 @@ function headCheck(settings, storedKey, title) {
   return label;
 }
 
+function groupSectionHead(section) {
+  const row = document.createElement("div");
+  row.className = "group-section";
+  const chip = section.open
+    ? window.WechatFeed.platformChip(section.items[0].id)
+    : Object.assign(document.createElement("span"), { className: "wf-plat is-wechat", textContent: "微" });
+  const name = document.createElement("strong");
+  name.textContent = section.name;
+  const count = document.createElement("small");
+  count.textContent = `${section.items.length} 个群`;
+  row.append(chip, name, count);
+  return row;
+}
+
 function fillGroupTable(box, settings) {
   if (!box) return;
   const top = box.scrollTop;
@@ -353,82 +373,92 @@ function fillGroupTable(box, settings) {
   headName.textContent = "群";
   head.append(headName, headCheck(settings, "all_feed_groups", "全部"), headCheck(settings, "ca_feed_groups", "CA"), document.createElement("span"));
   box.append(head);
-  let shown = 0;
-  for (const item of settings.groups || []) {
-    if ((settings.blocked_groups || []).includes(item.id)) continue;
-    const listen = window.WechatFeed.groupListenUsers(settings, item.id);
+  const visible = (settings.groups || []).filter((item) => {
+    if ((settings.blocked_groups || []).includes(item.id)) return false;
     const title = groupLabel(settings, item.id, item.name);
-    if (needle && !`${title} ${item.name || ""} ${item.id}`.toLowerCase().includes(needle)) continue;
-    shown += 1;
-    const wrap = document.createElement("div");
-    wrap.className = "group-item";
-    const row = document.createElement("div");
-    row.className = "group-row";
-    row.classList.toggle("is-open", expandedGroups.has(item.id));
-    const label = document.createElement("span");
-    label.className = "group-name";
-    label.textContent = title;
-    label.title = item.id;
-    const cell = (storedKey, picked, tip) => {
-      const holder = document.createElement("label");
-      holder.className = "group-check";
-      holder.title = tip;
-      const check = document.createElement("input");
-      check.type = "checkbox";
-      check.checked = picked.has(item.id);
-      check.addEventListener("change", () => {
-        saveFeedGroups(storedKey, window.WechatFeed.nextFeedGroups(settings[storedKey] || [], item.id, monitored));
+    return !needle || `${title} ${item.name || ""} ${item.id}`.toLowerCase().includes(needle);
+  });
+  const sections = window.WechatFeed.groupSections(visible);
+  const titled = sections.some((section) => section.open);
+  let shown = 0;
+  for (const section of sections) {
+    if (titled) box.append(groupSectionHead(section));
+    for (const item of section.items) {
+      const listen = window.WechatFeed.groupListenUsers(settings, item.id);
+      const title = groupLabel(settings, item.id, item.name);
+      shown += 1;
+      const wrap = document.createElement("div");
+      wrap.className = "group-item";
+      const row = document.createElement("div");
+      row.className = "group-row";
+      row.classList.toggle("is-open", expandedGroups.has(item.id));
+      const label = document.createElement("span");
+      label.className = "group-name";
+      label.textContent = title;
+      const chip = window.WechatFeed.platformChip(item.id);
+      if (chip) label.prepend(chip);
+      label.title = item.id;
+      const cell = (storedKey, picked, tip) => {
+        const holder = document.createElement("label");
+        holder.className = "group-check";
+        holder.title = tip;
+        const check = document.createElement("input");
+        check.type = "checkbox";
+        check.checked = picked.has(item.id);
+        check.addEventListener("change", () => {
+          saveFeedGroups(storedKey, window.WechatFeed.nextFeedGroups(settings[storedKey] || [], item.id, monitored));
+        });
+        holder.append(check);
+        return holder;
+      };
+      const membersBtn = document.createElement("button");
+      membersBtn.type = "button";
+      membersBtn.className = "group-members";
+      membersBtn.textContent = listen === null ? "成员" : `${listen.length}人`;
+      membersBtn.title = listen === null ? "查看成员、星标、屏蔽、只听部分人" : "正在只听部分用户";
+      membersBtn.addEventListener("click", () => {
+        if (expandedGroups.has(item.id)) expandedGroups.delete(item.id);
+        else expandedGroups.add(item.id);
+        refreshGroupLists(settings);
       });
-      holder.append(check);
-      return holder;
-    };
-    const membersBtn = document.createElement("button");
-    membersBtn.type = "button";
-    membersBtn.className = "group-members";
-    membersBtn.textContent = listen === null ? "成员" : `${listen.length}人`;
-    membersBtn.title = listen === null ? "查看成员、星标、屏蔽、只听部分人" : "正在只听部分用户";
-    membersBtn.addEventListener("click", () => {
-      if (expandedGroups.has(item.id)) expandedGroups.delete(item.id);
-      else expandedGroups.add(item.id);
-      refreshGroupLists(settings);
-    });
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "group-remove";
-    remove.textContent = "移除";
-    remove.addEventListener("click", () => {
-      send("unwatchGroup", { groupId: item.id }).then((state) => {
-        if (state?.ok) show(state);
-        else note(state?.detail || "没有保存成功", true);
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "group-remove";
+      remove.textContent = "移除";
+      remove.addEventListener("click", () => {
+        send("unwatchGroup", { groupId: item.id }).then((state) => {
+          if (state?.ok) show(state);
+          else note(state?.detail || "没有保存成功", true);
+        });
       });
-    });
-    const actions = document.createElement("span");
-    actions.className = "group-tail";
-    actions.append(membersBtn, remove);
-    row.append(
-      label,
-      cell("all_feed_groups", pickedAll, "在「全部消息」里显示这个群"),
-      cell("ca_feed_groups", pickedCa, "在「只看 CA」里显示这个群"),
-      actions,
-    );
-    wrap.append(row);
-    if (expandedGroups.has(item.id)) {
-      const panel = document.createElement("div");
-      panel.className = "member-panel";
-      const cached = memberCache.get(item.id);
-      if (cached && Date.now() - cached.at < 15000) {
-        renderMemberPanel(panel, settings, item.id, cached.members);
-      } else {
-        panel.textContent = "正在读取成员…";
-        ensureMembers(item.id)
-          .then(() => refreshGroupLists(settings))
-          .catch((error) => {
-            panel.textContent = error.message;
-          });
+      const actions = document.createElement("span");
+      actions.className = "group-tail";
+      actions.append(membersBtn, remove);
+      row.append(
+        label,
+        cell("all_feed_groups", pickedAll, "在「全部消息」里显示这个群"),
+        cell("ca_feed_groups", pickedCa, "在「只看 CA」里显示这个群"),
+        actions,
+      );
+      wrap.append(row);
+      if (expandedGroups.has(item.id)) {
+        const panel = document.createElement("div");
+        panel.className = "member-panel";
+        const cached = memberCache.get(item.id);
+        if (cached && Date.now() - cached.at < 15000) {
+          renderMemberPanel(panel, settings, item.id, cached.members);
+        } else {
+          panel.textContent = "正在读取成员…";
+          ensureMembers(item.id)
+            .then(() => refreshGroupLists(settings))
+            .catch((error) => {
+              panel.textContent = error.message;
+            });
+        }
+        wrap.append(panel);
       }
-      wrap.append(panel);
+      box.append(wrap);
     }
-    box.append(wrap);
   }
   if (!shown) {
     const empty = document.createElement("p");

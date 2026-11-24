@@ -840,33 +840,76 @@
   }
 
   // 开放接口推进来的消息带 platform；微信消息没有这个字段，不显示角标。
+  // [角标, 颜色, 名称]；名称和后端 openapi._PLATFORM_NAMES 保持一致。
   const PLATFORM_STYLE = {
-    telegram: ["TG", "#229ed9"],
-    tg: ["TG", "#229ed9"],
-    discord: ["DC", "#5865f2"],
-    qq: ["QQ", "#12b7f5"],
-    slack: ["SL", "#4a154b"],
-    whatsapp: ["WA", "#25d366"],
-    line: ["LINE", "#06c755"],
-    x: ["X", "#0f1419"],
-    twitter: ["X", "#0f1419"],
-    dingtalk: ["钉", "#3296fa"],
-    feishu: ["飞", "#3370ff"],
-    lark: ["LK", "#3370ff"],
-    wecom: ["企", "#0082ef"],
-    matrix: ["MX", "#0dbd8b"],
-    signal: ["SG", "#3a76f0"],
-    kook: ["KK", "#7a56f5"],
+    telegram: ["TG", "#229ed9", "Telegram"],
+    tg: ["TG", "#229ed9", "Telegram"],
+    discord: ["DC", "#5865f2", "Discord"],
+    qq: ["QQ", "#12b7f5", "QQ"],
+    slack: ["SL", "#4a154b", "Slack"],
+    whatsapp: ["WA", "#25d366", "WhatsApp"],
+    line: ["LINE", "#06c755", "LINE"],
+    x: ["X", "#0f1419", "X"],
+    twitter: ["X", "#0f1419", "X"],
+    dingtalk: ["钉", "#3296fa", "钉钉"],
+    feishu: ["飞", "#3370ff", "飞书"],
+    lark: ["LK", "#3370ff", "Lark"],
+    wecom: ["企", "#0082ef", "企业微信"],
+    matrix: ["MX", "#0dbd8b", "Matrix"],
+    signal: ["SG", "#3a76f0", "Signal"],
+    kook: ["KK", "#7a56f5", "KOOK"],
   };
+  const OPEN_ID = /^([a-z][a-z0-9_-]{1,15}):/;
   function isOpenId(value) {
-    return /^[a-z][a-z0-9_-]{1,15}:/.test(String(value || ""));
+    return OPEN_ID.test(String(value || ""));
+  }
+  function platformInfo(platform) {
+    const key = String(platform || "");
+    const known = PLATFORM_STYLE[key];
+    if (known) return { key, short: known[0], color: known[1], name: known[2] };
+    const name = key.length <= 4 ? key.toUpperCase() : key.charAt(0).toUpperCase() + key.slice(1);
+    return { key, short: key.slice(0, 2).toUpperCase(), color: `hsl(${hue(key)} 55% 42%)`, name };
+  }
+  /** 群来自哪里：微信的群返回 key=wechat；开放接口的群返回平台信息。 */
+  function groupSource(groupId) {
+    const match = OPEN_ID.exec(String(groupId || ""));
+    if (!match) return { key: "wechat", short: "", color: "", name: "微信", open: false };
+    return { ...platformInfo(match[1]), open: true };
+  }
+  /** 按来源分段：微信在前，其他平台按名称排序；段内保持原顺序。 */
+  function groupSections(items, idOf) {
+    const pick = idOf || ((item) => item && item.id);
+    const sections = new Map();
+    for (const item of items || []) {
+      const source = groupSource(pick(item));
+      // 按显示名归并：tg 和 telegram 同属一段「Telegram」。
+      const key = source.open ? `open:${source.name}` : "wechat";
+      if (!sections.has(key)) sections.set(key, { ...source, items: [] });
+      sections.get(key).items.push(item);
+    }
+    return Array.from(sections.values()).sort((a, b) => {
+      if (a.key === "wechat") return -1;
+      if (b.key === "wechat") return 1;
+      return a.name.localeCompare(b.name);
+    });
+  }
+  /** 群名前的平台角标（DOM 版，给群管理表格用）。微信的群返回 null。 */
+  function platformChip(groupId) {
+    const source = groupSource(groupId);
+    if (!source.open) return null;
+    const chip = document.createElement("span");
+    chip.className = "wf-plat";
+    chip.style.setProperty("--wf-plat", source.color);
+    chip.title = `来自 ${source.name}`;
+    chip.textContent = source.short;
+    return chip;
   }
   function platformTag(card) {
     const platform = String((card && card.platform) || "");
     if (!platform) return "";
-    const [short, color] = PLATFORM_STYLE[platform] || [platform.slice(0, 2).toUpperCase(), `hsl(${hue(platform)} 55% 42%)`];
-    const label = card.platformName || platform;
-    return `<span class="wf-plat" style="--wf-plat:${escapeText(color)}" title="来自 ${escapeText(label)}">${escapeText(short)}</span>`;
+    const info = platformInfo(platform);
+    const label = card.platformName || info.name;
+    return `<span class="wf-plat" style="--wf-plat:${escapeText(info.color)}" title="来自 ${escapeText(label)}">${escapeText(info.short)}</span>`;
   }
   function identityHtml(card) {
     const name = card.displayName || card.senderName || "群成员";
@@ -1676,6 +1719,10 @@
     tickFresh,
     startFreshTick,
     syncList,
+    isOpenId,
+    groupSource,
+    groupSections,
+    platformChip,
     hue,
     feedGroupIds,
     cardInFeed,

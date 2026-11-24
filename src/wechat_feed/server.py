@@ -300,7 +300,13 @@ def create_app() -> FastAPI:
     refresh_job = RefreshJob()
     direct = DirectSource(data_dir() / "direct.json")
     open_dir = OpenDirectory(data_dir() / "open.db", data_dir() / "open_media")
-    intake = OpenIntake(store, hub, token_index, open_dir)
+    intake = OpenIntake(
+        store,
+        hub,
+        token_index,
+        open_dir,
+        on_settings=lambda settings: hub.notify_settings(public_settings(settings)),
+    )
     listener = OpenListener(lambda: create_open_app(store, intake))
     open_disabled = os.environ.get("WECHAT_FEED_DISABLE_OPEN") == "1"
     root = project_root()
@@ -796,7 +802,6 @@ def create_app() -> FastAPI:
     async def get_groups() -> dict[str, Any]:
         settings = store.get()
         started = time.perf_counter()
-        extra = await asyncio.to_thread(_open_groups)
         try:
             reader = await direct.reader(str(settings["upstream_base"]))
             if reader is not None:
@@ -807,8 +812,6 @@ def create_app() -> FastAPI:
                 source = "wda"
         except Exception as exc:
             logger.info("读取群列表失败: {}", type(exc).__name__)
-            if extra:
-                return {"groups": extra, "warning": "读不到本机微信会话，只列出开放接口推送过的群"}
             raise HTTPException(
                 status_code=502,
                 detail="读不到本机微信会话。请确认 WeChatDataAnalysis 已启动并完成解密。",
@@ -819,7 +822,8 @@ def create_app() -> FastAPI:
             source,
             (time.perf_counter() - started) * 1000,
         )
-        return {"groups": groups + extra}
+        # 只列微信群；开放接口的群在本地页单独一块（GET /api/open-api）。
+        return {"groups": groups}
 
     @app.get("/api/groups/{group_id}/members")
     async def get_members(group_id: str) -> dict[str, Any]:
@@ -974,6 +978,7 @@ def create_app() -> FastAPI:
             "host": settings.get("open_api_host"),
             "port": settings.get("open_api_port"),
             "allowIps": settings.get("open_api_allow_ips") or [],
+            "autoWatch": settings.get("open_auto_watch") or [],
             "lanAddresses": await asyncio.to_thread(lan_addresses),
             "listener": dict(listener.state),
             "queue": intake.depth(),

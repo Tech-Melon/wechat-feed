@@ -40,6 +40,7 @@ function renderForm(data) {
   $("#op-host").value = data.host || "0.0.0.0";
   $("#op-port").value = data.port || 8766;
   $("#op-allow").value = (data.allowIps || []).join("\n");
+  $("#op-auto").value = (data.autoWatch || []).join(", ");
 }
 
 function endpoints(data) {
@@ -101,7 +102,7 @@ function render(data) {
       <td>${chat.watched ? "已监控" : "未监控（不显示）"}</td>
       <td>
         <button type="button" class="dm-btn small" data-watch="${esc(chat.id)}" data-on="${chat.watched ? "0" : "1"}">${chat.watched ? "移除监控" : "加入监控"}</button>
-        <button type="button" class="dm-btn small" data-forget="${esc(chat.id)}" title="从这个列表里删掉；以后再推送会重新出现">删除记录</button>
+        <button type="button" class="dm-btn small" data-forget="${esc(chat.id)}" title="从列表里隐藏；以后再推送会重新出现，但不会被自动监控加回来">删除记录</button>
       </td>
     </tr>`,
   );
@@ -181,6 +182,10 @@ $("#op-form").addEventListener("submit", async (event) => {
       open_api_host: $("#op-host").value.trim() || "0.0.0.0",
       open_api_port: port,
       open_api_allow_ips: allow,
+      open_auto_watch: $("#op-auto")
+        .value.split(/[\s,，]+/)
+        .map((item) => item.trim().toLowerCase())
+        .filter(Boolean),
     });
     state.formDirty = false;
     out.textContent = "已保存。";
@@ -230,7 +235,7 @@ $("#op-chats").addEventListener("click", async (event) => {
     if (watch) {
       await setWatched(watch.dataset.watch, watch.dataset.on === "1");
     } else if (forget) {
-      if (!confirm("从列表里删掉这个群？已入库的消息不受影响。")) return;
+      if (!confirm("从列表里隐藏这个群？已入库的消息不受影响，再推送会重新出现。")) return;
       await call(`/api/open-api/chats/${encodeURIComponent(forget.dataset.forget)}`, { method: "DELETE" });
     } else {
       return;

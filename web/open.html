@@ -6,7 +6,7 @@
     <meta name="robots" content="noindex" />
     <title>开放接口 · 技术瓜群流</title>
     <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
-    <link rel="stylesheet" href="/assets/gmgn.css?v=0.9.37" />
+    <link rel="stylesheet" href="/assets/gmgn.css?v=0.9.38" />
     <style>
       .op-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
       .op-key { font-family: ui-monospace, Consolas, monospace; font-size: 13px; padding: 8px 10px; border-radius: 10px; background: #fffaeb; border: 1px solid #fedf89; word-break: break-all; }
@@ -44,9 +44,13 @@
           <label>来源 IP 白名单（每行一个 IP 或网段，留空 = 只收局域网私有地址）
             <textarea id="op-allow" placeholder="192.168.1.20&#10;192.168.1.0/24"></textarea>
           </label>
+          <label>自动监控新群的平台（逗号分隔，留空 = 都要手动加）
+            <input id="op-auto" placeholder="telegram, discord" size="22" />
+          </label>
           <button type="submit">保存</button>
         </form>
         <p id="op-form-out" class="gm-hint" role="status" aria-live="polite"></p>
+        <p class="gm-hint">自动监控只对<b>第一次出现</b>的群生效：已经推送过、或者被你移除过监控的群不会被自动加回来。监控群（含微信群）总数上限 50 个。</p>
         <p class="gm-hint">本地页和 /api/* 仍然只监听 127.0.0.1:8765，局域网端口上只有 /open/v1/*。第一次开启时 Windows 防火墙可能拦截，需要放行这个端口，命令见接入指南。</p>
       </section>
 
@@ -101,7 +105,7 @@
         <p class="gm-hint">完整说明见仓库 docs/开放接口.md，Python 示例见 scripts/open_push_example.py。</p>
       </section>
     </main>
-    <script src="/shared/feed.js?v=0.9.37"></script>
-    <script src="/assets/open.js?v=0.9.37"></script>
+    <script src="/shared/feed.js?v=0.9.38"></script>
+    <script src="/assets/open.js?v=0.9.38"></script>
   </body>
 </html>

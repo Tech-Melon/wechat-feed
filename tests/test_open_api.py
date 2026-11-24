@@ -305,3 +305,48 @@ def test_malformed_signature_headers_are_401(env) -> None:
             b"X-WF-Signature": sig,
         }
         assert lan.post(PATH, content=raw, headers=headers).status_code == 401
+
+
+def test_auto_watch_adds_only_new_chats(env) -> None:
+    lan: TestClient = env["lan"]
+    store: SettingsStore = env["store"]
+    intake: OpenIntake = env["intake"]
+    raw, headers = _signed(env["key"], {"platform": "telegram", "messages": [_message()]})
+    assert lan.post(PATH, content=raw, headers=headers).json()["ignored"] == 1
+
+    store.replace({"open_auto_watch": ["telegram"]})
+    fresh = _message(id="1", chat={"id": "-1009", "name": "新群"})
+    body = {"platform": "telegram", "messages": [fresh, _message(id="2")]}
+    raw, headers = _signed(env["key"], body)
+    out = lan.post(PATH, content=raw, headers=headers).json()
+    # 新群自动加入并入库；之前见过、没加监控的群保持不显示。
+    assert [r["status"] for r in out["results"]] == ["accepted", "ignored"]
+    assert [g["id"] for g in store.get()["groups"]] == ["telegram:-1009"]
+    _drain(intake)
+
+    other = {"platform": "qq", "messages": [_message(id="3", chat={"id": "777"})]}
+    raw, headers = _signed(env["key"], other)
+    assert lan.post(PATH, content=raw, headers=headers).json()["ignored"] == 1
+    with pytest.raises(ValueError):
+        normalize_settings({"open_auto_watch": ["Bad Name"]})
+
+
+def test_forgotten_chat_is_not_auto_watched(env) -> None:
+    lan: TestClient = env["lan"]
+    store: SettingsStore = env["store"]
+    intake: OpenIntake = env["intake"]
+    raw, headers = _signed(env["key"], {"platform": "telegram", "messages": [_message()]})
+    lan.post(PATH, content=raw, headers=headers)
+    assert intake.directory.forget_chat("telegram:-1001234567")
+    assert not intake.directory.chats()
+    store.replace({"open_auto_watch": ["telegram"]})
+    raw, headers = _signed(env["key"], {"platform": "telegram", "messages": [_message(id="5")]})
+    assert lan.post(PATH, content=raw, headers=headers).json()["ignored"] == 1
+    assert store.get()["groups"] == []
+    assert [chat["id"] for chat in intake.directory.chats()] == ["telegram:-1001234567"]
+
+    # 新群第一批消息全被拒收，也已记进目录：移除后不会再被当成新群加回来。
+    bad = _message(id="6", chat={"id": "-2002"}, type="html")
+    raw, headers = _signed(env["key"], {"platform": "telegram", "messages": [bad]})
+    assert lan.post(PATH, content=raw, headers=headers).json()["rejected"] == 1
+    assert "telegram:-2002" in intake.directory.known(["telegram:-2002"])

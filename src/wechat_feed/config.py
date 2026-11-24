@@ -76,6 +76,7 @@ def default_settings() -> dict[str, Any]:
         "open_api_host": "0.0.0.0",
         "open_api_port": OPEN_DEFAULT_PORT,
         "open_api_allow_ips": [],
+        "open_auto_watch": [],
     }
 
 
@@ -165,6 +166,20 @@ def _clean_open_settings(raw: dict[str, Any], merged: dict[str, Any]) -> None:
         merged["open_api_port"] = port
     if "open_api_allow_ips" in raw:
         merged["open_api_allow_ips"] = _clean_allow_ips(raw["open_api_allow_ips"])
+    if "open_auto_watch" in raw:
+        value = raw["open_auto_watch"]
+        if not isinstance(value, list) or len(value) > 32:
+            raise ValueError("自动监控的平台必须是数组，最多 32 个")
+        platforms: list[str] = []
+        for item in value:
+            text = str(item or "").strip().lower()
+            if not text:
+                continue
+            if not OPEN_PLATFORM.match(text):
+                raise ValueError(f"平台标识不合法：{text[:20]}")
+            if text not in platforms:
+                platforms.append(text)
+        merged["open_auto_watch"] = platforms
 
 
 def _clean_user_list(value: Any, *, limit: int, label: str) -> list[str]:
@@ -373,6 +388,7 @@ def normalize_settings(raw: dict[str, Any]) -> dict[str, Any]:
         "open_api_host",
         "open_api_port",
         "open_api_allow_ips",
+        "open_auto_watch",
     }
     if unknown:
         raise ValueError("含有不支持的配置项")

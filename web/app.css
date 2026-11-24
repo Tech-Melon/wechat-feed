@@ -704,6 +704,21 @@ body {
   white-space: nowrap;
 }
 .wf-group:hover { filter: brightness(0.97); }
+/* 群聊选择管理：有开放接口的群时按来源分段 */
+.group-section {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 6px 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.group-section strong { color: var(--ink); }
+.group-section + .group-item { border-top: 0; }
+.wf-plat.is-wechat { background: #07c160; }
+.open-directory { display: grid; gap: 6px; margin-top: 8px; }
+.open-directory[hidden] { display: none; }
+.open-directory .group-hint a { margin-left: 6px; }
 /* 开放接口推进来的消息：群名前的平台角标（TG / DC / QQ …） */
 .wf-plat {
   display: inline-block;

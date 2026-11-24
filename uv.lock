@@ -686,7 +686,7 @@ wheels = [
 
 [[package]]
 name = "wechat-feed"
-version = "0.9.37"
+version = "0.9.38"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },

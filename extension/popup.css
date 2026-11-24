@@ -200,6 +200,10 @@ section { padding: 10px 14px 4px; }
 .group-check input, .group-head-check input { width: 14px; height: 14px; margin: 0; cursor: pointer; }
 .group-tail { display: flex; gap: 4px; justify-content: flex-end; }
 .group-empty { padding: 6px 4px; }
+.group-section { display: flex; align-items: center; gap: 5px; padding: 6px 4px 2px; font-size: 11px; color: #667085; }
+.group-section strong { color: #101828; }
+.wf-plat { display: inline-block; flex: none; margin-right: 4px; padding: 0 4px; border-radius: 4px; background: var(--wf-plat, #667085); color: #fff; font-size: 9px; font-weight: 800; line-height: 14px; vertical-align: middle; }
+.wf-plat.is-wechat { background: #07c160; }
 
 .group-members,
 .group-remove {

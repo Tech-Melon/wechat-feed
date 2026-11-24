@@ -8,7 +8,7 @@
     <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
     <link rel="icon" href="/assets/favicon.png" type="image/png" sizes="128x128" />
     <link rel="apple-touch-icon" href="/assets/favicon.png" />
-    <link rel="stylesheet" href="/assets/app.css?v=0.9.37" />
+    <link rel="stylesheet" href="/assets/app.css?v=0.9.38" />
   </head>
   <body>
     <header class="top">
@@ -136,7 +136,7 @@
               <button type="submit">添加群</button>
             </form>
             <div class="actions">
-              <button id="load-groups" type="button">读取本机群</button>
+              <button id="load-groups" type="button" title="读取本机微信的群会话；开放接口的群列在下方单独一块">读取本机微信群</button>
               <button id="demo" type="button">插入一条样例</button>
               <button id="clear" type="button" class="danger" title="删除本地缓存的群消息记录（不影响监控群设置）">清空消息记录</button>
             </div>
@@ -145,6 +145,10 @@
             <input id="directory-query" type="search" placeholder="筛选本机群名称或 ID" />
           </label>
           <div id="directory" class="directory"></div>
+          <div id="open-directory" class="open-directory" hidden>
+            <p class="group-hint">开放接口推送过、还没加入监控的群（新群默认不显示）。勾选即加入监控，之后推送的消息才会显示。<a href="/open" target="_blank" rel="noreferrer">开放接口设置</a></p>
+            <div id="open-directory-list" class="directory"></div>
+          </div>
         </div>
       </details>
       <p id="notice" class="notice"></p>
@@ -157,7 +161,7 @@
       技术瓜群流 · 作者 <a href="https://x.com/0xTechMelon" target="_blank" rel="noreferrer">@0xTechMelon</a>
       · 更多产品见 <a href="https://docs.jishugua.top" target="_blank" rel="noreferrer">docs.jishugua.top</a>
     </footer>
-    <script src="/shared/feed.js?v=0.9.37"></script>
-    <script src="/assets/app.js?v=0.9.37"></script>
+    <script src="/shared/feed.js?v=0.9.38"></script>
+    <script src="/assets/app.js?v=0.9.38"></script>
   </body>
 </html>

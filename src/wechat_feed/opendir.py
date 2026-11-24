@@ -155,6 +155,10 @@ class OpenDirectory:
             );
             """
         )
+        # 0.9.38：「删除记录」只隐藏，不删行，免得自动监控把它当新群加回来。
+        columns = {row[1] for row in self._conn.execute("PRAGMA table_info(chats)")}
+        if "hidden" not in columns:
+            self._conn.execute("ALTER TABLE chats ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0")
         self._conn.commit()
 
     # ---- 目录 ----
@@ -176,7 +180,8 @@ class OpenDirectory:
                         avatar = CASE WHEN excluded.avatar != ''
                             THEN excluded.avatar ELSE avatar END,
                         last_seen = MAX(last_seen, excluded.last_seen),
-                        messages = messages + 1
+                        messages = messages + 1,
+                        hidden = 0
                     """,
                     (chat["id"], row["platform"], chat["name"], chat["avatar"], now, now),
                 )
@@ -211,7 +216,7 @@ class OpenDirectory:
         with self._lock:
             rows = self._conn.execute(
                 "SELECT id, platform, name, first_seen, last_seen, messages FROM chats "
-                "ORDER BY last_seen DESC LIMIT 500"
+                "WHERE hidden = 0 ORDER BY last_seen DESC LIMIT 500"
             ).fetchall()
         return [
             {
@@ -224,6 +229,31 @@ class OpenDirectory:
             }
             for row in rows
         ]
+
+    def remember_chats(self, platform: str, chats: dict[str, str]) -> None:
+        """自动监控加入的群先记进目录：就算这批消息全被拒收，之后也不会被当成新群重复加入。"""
+        now = int(time.time())
+        with self._lock:
+            for chat_id, name in chats.items():
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO chats"
+                    "(id, platform, name, first_seen, last_seen, messages) "
+                    "VALUES (?, ?, ?, ?, ?, 0)",
+                    (chat_id, platform, name, now, now),
+                )
+            self._conn.commit()
+
+    def known(self, chat_ids: list[str]) -> set[str]:
+        """目录里已经见过的群。自动监控只加从没见过的新群，用户移除过的不会被加回来。"""
+        ids = [item for item in dict.fromkeys(chat_ids) if item]
+        if not ids:
+            return set()
+        placeholders = ",".join("?" for _ in ids)
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT id FROM chats WHERE id IN ({placeholders})", ids
+            ).fetchall()
+        return {str(row[0]) for row in rows}
 
     def chat_name(self, chat_id: str) -> str:
         with self._lock:
@@ -245,11 +275,14 @@ class OpenDirectory:
         return out
 
     def forget_chat(self, chat_id: str) -> bool:
+        # 只隐藏：再推送会重新出现在列表里，但仍算「见过」，不会被自动监控加回来。
         with self._lock:
-            deleted = self._conn.execute("DELETE FROM chats WHERE id = ?", (chat_id,)).rowcount
+            changed = self._conn.execute(
+                "UPDATE chats SET hidden = 1 WHERE id = ?", (chat_id,)
+            ).rowcount
             self._conn.execute("DELETE FROM members WHERE chat_id = ?", (chat_id,))
             self._conn.commit()
-        return bool(deleted)
+        return bool(changed)
 
     def avatar_source(self, ident: str) -> str:
         with self._lock:
