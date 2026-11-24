@@ -19,6 +19,7 @@ from urllib.parse import urljoin, urlsplit
 from loguru import logger
 
 from . import http as feed_http
+from .store import KEEP_SECONDS
 from .wxemoji import pick_mime
 
 AVATAR_MAX = 2 * 1024 * 1024
@@ -28,7 +29,6 @@ AVATAR_REFETCH_GAP = 3600
 AVATAR_TTL = 3 * 24 * 3600
 # 下载失败后记一个标记，10 分钟内不再重试，避免每次刷新页面都去打对方服务器。
 MISS_TTL = 600
-KEEP_SECONDS = 30 * 24 * 3600
 _REDIRECTS = {301, 302, 303, 307, 308}
 _UA = "Mozilla/5.0 (compatible; wechat-feed open-api)"
 

@@ -1,4 +1,4 @@
-"""把信息流卡片落到本机 SQLite，保留近 30 天。"""
+"""把信息流卡片落到本机 SQLite，保留近半年（180 天）。"""
 
 from __future__ import annotations
 
@@ -9,7 +9,10 @@ import time
 from pathlib import Path
 from typing import Any
 
-KEEP_SECONDS = 30 * 24 * 3600
+from .msgstats import MessageStats
+
+# 微信和开放接口的消息都保留 180 天；统计（msg_stats）同步保留。
+KEEP_SECONDS = 180 * 24 * 3600
 
 
 class CardStore:
@@ -43,14 +46,41 @@ class CardStore:
             "CREATE INDEX IF NOT EXISTS idx_cards_conv_cursor "
             "ON cards(conversation_id, create_time, received_at, id)"
         )
+        self._migrate_sender()
         self._conn.commit()
+        self.stats = MessageStats(self._conn, self._lock)
+        self.stats.ensure_built()
+
+    def _migrate_sender(self) -> None:
+        """0.9.40：发言人单独成列并建索引。保留半年后，按人找上下文不能再靠 json_extract 扫全群。"""
+        columns = {row[1] for row in self._conn.execute("PRAGMA table_info(cards)")}
+        if "sender" not in columns:
+            # 加列和回填放进同一个事务：中途被杀就整体回滚，下次启动重做，不会留下一列空值。
+            self._conn.commit()
+            self._conn.execute("BEGIN")
+            try:
+                self._conn.execute("ALTER TABLE cards ADD COLUMN sender TEXT NOT NULL DEFAULT ''")
+                self._conn.execute(
+                    "UPDATE cards SET sender = "
+                    "COALESCE(json_extract(payload, '$.senderUsername'), '')"
+                )
+                self._conn.execute("COMMIT")
+            except sqlite3.Error:
+                self._conn.execute("ROLLBACK")
+                raise
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_cards_conv_sender_cursor "
+            "ON cards(conversation_id, sender, create_time, received_at, id)"
+        )
 
     def cutoff(self) -> int:
         return int(time.time()) - KEEP_SECONDS
 
     def token_cards(self) -> list[dict[str, Any]]:
+        # 先用子串粗筛掉 tokenCards 为空的卡片，半年数据量下不必逐条解析 JSON。
         rows = self._conn.execute(
-            "SELECT payload FROM cards ORDER BY create_time ASC, received_at ASC, id ASC"
+            "SELECT payload FROM cards WHERE instr(payload, '\"tokenCards\": []') = 0 "
+            "ORDER BY create_time ASC, received_at ASC, id ASC"
         ).fetchall()
         out: list[dict[str, Any]] = []
         for (raw,) in rows:
@@ -62,11 +92,13 @@ class CardStore:
                 out.append(card)
         return out
 
-    def save(self, card: dict[str, Any], *, replace: bool = True) -> None:
+    def save(self, card: dict[str, Any], *, replace: bool = True) -> bool:
+        """写入一张卡片。replace=False 时返回这次是否真的新插入（库里已有则 False）。"""
         card_id = str(card.get("id") or "")
         if not card_id:
-            return
+            return False
         conversation_id = str(card.get("conversationId") or "")
+        sender = str(card.get("senderUsername") or "")
         create_time = int(card.get("createTime") or 0)
         received_at = int(card.get("receivedAt") or 0)
         payload = json.dumps(card, ensure_ascii=False)
@@ -77,18 +109,23 @@ class CardStore:
             else "ON CONFLICT(id) DO NOTHING"
         )
         with self._lock:
-            self._conn.execute(
+            cursor = self._conn.execute(
                 f"""
-                INSERT INTO cards(id, conversation_id, create_time, received_at, payload)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO cards(id, conversation_id, create_time, received_at, sender, payload)
+                VALUES (?, ?, ?, ?, ?, ?)
                 {conflict}
                 """,
-                (card_id, conversation_id, create_time, received_at, payload),
+                (card_id, conversation_id, create_time, received_at, sender, payload),
             )
+            # 新卡片都走 replace=False（Hub.publish），这时 rowcount 能区分新插入和重复。
+            inserted = not replace and cursor.rowcount == 1
+            if inserted:
+                self.stats.add_locked(card, sender)
             self._dirty += 1
             if replace or self._dirty >= 40:
                 self._conn.commit()
                 self._dirty = 0
+        return inserted
 
     def exists(self, card_id: str) -> bool:
         if not card_id:
@@ -277,13 +314,81 @@ class CardStore:
     def clear(self) -> None:
         with self._lock:
             self._conn.execute("DELETE FROM cards")
+            self._conn.execute("DELETE FROM msg_stats")
+            self._conn.execute("DELETE FROM stat_names")
             self._conn.commit()
 
     def prune(self) -> None:
         cutoff = self.cutoff()
         with self._lock:
             self._conn.execute("DELETE FROM cards WHERE create_time < ?", (cutoff,))
+            # 统计按整点桶存，桶整段过期才删，和消息保留期最多差 1 小时。
+            self._conn.execute("DELETE FROM msg_stats WHERE bucket + 3600 <= ?", (cutoff,))
+            self.stats.prune_names_locked()
             self._conn.commit()
+
+    def purge(self, start: int, end: int, dry_run: bool = True) -> dict[str, int]:
+        """手动删除发送时间在 [start, end) 的群消息，并按剩下的消息重算这段统计。"""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*), COALESCE(SUM(instr(conversation_id, ':') > 0), 0) "
+                "FROM cards WHERE create_time >= ? AND create_time < ?",
+                (start, end),
+            ).fetchone()
+            if not dry_run:
+                self._conn.execute(
+                    "DELETE FROM cards WHERE create_time >= ? AND create_time < ?", (start, end)
+                )
+                self.stats.rebuild_locked(start, end)
+                self.stats.prune_names_locked()
+                self._conn.commit()
+                self._dirty = 0
+        total = int(row[0] or 0)
+        opened = int(row[1] or 0)
+        return {"messages": total, "openMessages": opened, "wechatMessages": total - opened}
+
+    def data_summary(self) -> dict[str, Any]:
+        with self._lock:
+            span = self._conn.execute(
+                "SELECT MIN(create_time), MAX(create_time), COUNT(*) FROM cards"
+            ).fetchone()
+            months = self._conn.execute(
+                """
+                SELECT strftime('%Y-%m', create_time, 'unixepoch', 'localtime') AS month,
+                       COUNT(*), COALESCE(SUM(instr(conversation_id, ':') > 0), 0),
+                       COUNT(DISTINCT conversation_id)
+                FROM cards GROUP BY month ORDER BY month DESC
+                """
+            ).fetchall()
+            pages = self._conn.execute("PRAGMA page_count").fetchone()[0]
+            page_size = self._conn.execute("PRAGMA page_size").fetchone()[0]
+        return {
+            "oldest": span[0],
+            "newest": span[1],
+            "messages": int(span[2] or 0),
+            "keepDays": KEEP_SECONDS // 86400,
+            "bytes": int(pages or 0) * int(page_size or 0),
+            "months": [
+                {
+                    "month": row[0],
+                    "messages": int(row[1] or 0),
+                    "openMessages": int(row[2] or 0),
+                    "wechatMessages": int(row[1] or 0) - int(row[2] or 0),
+                    "groups": int(row[3] or 0),
+                }
+                for row in months
+            ],
+        }
+
+    def vacuum(self) -> int:
+        with self._lock:
+            self._conn.commit()
+            self._dirty = 0
+            self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            self._conn.execute("VACUUM")
+            pages = self._conn.execute("PRAGMA page_count").fetchone()[0]
+            page_size = self._conn.execute("PRAGMA page_size").fetchone()[0]
+        return int(pages or 0) * int(page_size or 0)
 
     def images_without_media(self) -> list[str]:
         """直读模式早期存下的图片卡片没有图片地址。"""
@@ -357,7 +462,7 @@ class CardStore:
         sender_sql = ""
         extra: list[Any] = []
         if sender:
-            sender_sql = "AND json_extract(payload, '$.senderUsername') = ? "
+            sender_sql = "AND sender = ? "
             extra = [sender]
         # 行值游标配 idx_cards_conv_cursor，按索引顺序取，不再做临时排序。
         if newer:

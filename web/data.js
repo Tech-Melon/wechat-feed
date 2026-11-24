@@ -2,7 +2,12 @@
 
 // 数据管理页：按月份或自定义日期删除排行榜 / GMGN 调用记录，先预览再确认。
 
-const TARGET_TEXT = { board: "排行榜喊单", gmgn: "GMGN 调用记录", all: "排行榜与 GMGN 调用记录" };
+const TARGET_TEXT = {
+  messages: "群消息",
+  board: "排行榜喊单",
+  gmgn: "GMGN 调用记录",
+  all: "群消息、排行榜与 GMGN 调用记录",
+};
 const state = { pending: null };
 
 function $(sel) {
@@ -58,6 +63,7 @@ async function post(url, body) {
 
 function countsText(out) {
   const parts = [];
+  if (out.messages) parts.push(`群消息 ${out.messages.messages} 条（微信 ${out.messages.wechatMessages}、开放接口 ${out.messages.openMessages}）`);
   if (out.board) parts.push(`排行榜：喊单 ${out.board.calls} 条、群首喊 ${out.board.groupFirsts} 条、随之清空的代币 ${out.board.tokens} 个`);
   if (out.gmgn) parts.push(`GMGN：明细 ${out.gmgn.rawRows} 条、分钟汇总 ${out.gmgn.minuteRows} 条`);
   return parts.join("；");
@@ -69,7 +75,10 @@ async function preview(target, start, end, label) {
   try {
     const out = await post("/api/data/purge", { target, start, end, dryRun: true });
     state.pending = { target, start, end, label };
-    const empty = (!out.board || out.board.calls + out.board.groupFirsts === 0) && (!out.gmgn || out.gmgn.rawRows + out.gmgn.minuteRows === 0);
+    const empty =
+      (!out.board || out.board.calls + out.board.groupFirsts === 0) &&
+      (!out.gmgn || out.gmgn.rawRows + out.gmgn.minuteRows === 0) &&
+      (!out.messages || out.messages.messages === 0);
     box.innerHTML = empty
       ? `${esc(label)}：没有可删除的${esc(TARGET_TEXT[target])}。`
       : `<p>将删除 <b>${esc(label)}</b> 的${esc(TARGET_TEXT[target])}：${esc(countsText(out))}。</p>
@@ -110,6 +119,9 @@ async function load() {
   const data = await res.json();
   const b = data.board;
   const g = data.gmgn;
+  const m = data.messages;
+  $("#dm-msg-meta").textContent = `${m.messages} 条 · ${day(m.oldest)} ~ ${day(m.newest)} · 文件约 ${size(m.bytes)} · 保留 ${m.keepDays} 天`;
+  $("#dm-msg").innerHTML = monthRows(m.months, "messages", [["消息", "messages"], ["微信", "wechatMessages"], ["开放接口", "openMessages"], ["群", "groups"]]);
   $("#dm-board-meta").textContent = `${b.calls} 条喊单 · ${b.tokens} 个代币 · ${day(b.oldest)} ~ ${day(b.newest)} · 文件 ${size(b.bytes)} · 保留 ${b.keepDays} 天`;
   $("#dm-board").innerHTML = monthRows(b.months, "board", [["喊单", "calls"], ["代币", "tokens"], ["喊单人", "users"]]);
   $("#dm-purged").textContent = b.purged.length
@@ -171,7 +183,7 @@ $("#dm-vacuum").addEventListener("click", async () => {
   out.textContent = "正在压缩…";
   try {
     const r = await post("/api/data/vacuum", {});
-    out.textContent = `完成：排行榜 ${size(r.boardBytes)}，GMGN 记录 ${size(r.gmgnBytes)}。`;
+    out.textContent = `完成：群消息 ${size(r.messageBytes)}，排行榜 ${size(r.boardBytes)}，GMGN 记录 ${size(r.gmgnBytes)}。`;
     await load();
   } catch (error) {
     out.textContent = `压缩失败：${error.message}`;

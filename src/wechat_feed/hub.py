@@ -61,6 +61,24 @@ class Hub:
         self._cards.clear()
         self._broadcast({"type": "cleared"})
 
+    def forget_range(self, start: int, end: int) -> int:
+        """手动删除一段消息后，把内存里同一段的卡片也去掉，免得之后 patch 把它们写回库。"""
+        drop = {
+            card_id
+            for card_id, card in self._cards.items()
+            if start <= int(card.get("createTime") or 0) < end
+        }
+        if not drop:
+            return 0
+        self._order = deque(item for item in self._order if item not in drop)
+        for card_id in drop:
+            self._cards.pop(card_id, None)
+        return len(drop)
+
+    def notify_reload(self) -> None:
+        # 前端收到 cleared 会清空缓存并重新拉第一页。
+        self._broadcast({"type": "cleared"})
+
     def patch(self, card_id: str, fields: dict[str, Any], *, notify: bool = True) -> None:
         card = self._cards.get(card_id)
         if card is not None:
@@ -92,10 +110,11 @@ class Hub:
         card_id = str(card.get("id") or "")
         if not card_id or card_id in self._cards:
             return False
+        # 库里已经有（重启后回拉、上游重复推送）：不再广播，提示音也不会重复响。
+        if self._persist is not None and not self._persist.save(card, replace=False):
+            return False
         self._cards[card_id] = card
         self._order.append(card_id)
-        if self._persist is not None:
-            self._persist.save(card, replace=False)
         while len(self._order) > self._limit:
             oldest = self._order.popleft()
             self._cards.pop(oldest, None)
@@ -116,10 +135,10 @@ class Hub:
             if notify:
                 self._broadcast({"type": "patch", "id": card_id, "card": card})
         # 普通发言也要刷新同群同发送者更早 CA 卡的后三句。
-        self._refresh_sender_ca_context(card)
+        self._refresh_sender_ca_context(card, notify=notify)
         return True
 
-    def _refresh_sender_ca_context(self, card: dict[str, Any]) -> None:
+    def _refresh_sender_ca_context(self, card: dict[str, Any], *, notify: bool = True) -> None:
         if self._persist is None:
             return
         for older in self._persist.earlier_ca_cards(card):
@@ -129,6 +148,7 @@ class Hub:
             self.patch(
                 str(older.get("id") or ""),
                 {"contextBefore": before, "contextAfter": after},
+                notify=notify,
             )
 
     def subscribe(self) -> asyncio.Queue[dict[str, Any]]:

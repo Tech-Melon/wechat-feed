@@ -183,7 +183,7 @@ def _time(value: Any, now: float) -> int:
     if seconds > now + FUTURE_SLACK:
         return int(now)
     if seconds < now - KEEP_SECONDS:
-        raise Rejected("time 早于 30 天，信息流不再保留")
+        raise Rejected(f"time 早于 {KEEP_SECONDS // 86400} 天，超出消息保留期")
     return seconds
 
 
@@ -369,7 +369,7 @@ class OpenIntake:
             "requests": 0,
             "accepted": 0,
             "duplicate": 0,
-            "ignored": 0,
+            "stored": 0,
             "rejected": 0,
             "authFailed": 0,
             "lastAt": 0,
@@ -401,7 +401,7 @@ class OpenIntake:
         results: list[dict[str, Any]] = []
         rows: list[dict[str, Any]] = []
         ready: list[dict[str, Any]] = []
-        counts = {"accepted": 0, "duplicate": 0, "ignored": 0, "rejected": 0}
+        counts = {"accepted": 0, "stored": 0, "duplicate": 0, "rejected": 0}
         persist = self.hub.persist
         for item in messages:
             raw_id = str(item.get("id") or "")[:64] if isinstance(item, dict) else ""
@@ -415,18 +415,17 @@ class OpenIntake:
                 continue
             rows.append(row)
             card_id = card["id"]
-            if card["conversationId"] not in watched:
-                status = "ignored"
-            elif card_id in self._pending or (persist is not None and persist.exists(card_id)):
+            if card_id in self._pending or (persist is not None and persist.exists(card_id)):
                 status = "duplicate"
             else:
-                status = "accepted"
+                # 没加入监控的群也入库（不显示、不解析合约），加入监控后历史消息和统计都在。
+                status = "accepted" if card["conversationId"] in watched else "stored"
                 self._pending.add(card_id)
                 ready.append(card)
             counts[status] += 1
             entry: dict[str, Any] = {"id": raw_id, "status": status}
-            if status == "ignored":
-                entry["reason"] = "这个群还没在「群聊选择管理」里加入监控"
+            if status == "stored":
+                entry["reason"] = "群未加入监控：已入库，不显示"
             results.append(entry)
         if ready and self.queue.qsize() + len(ready) > self.maxsize:
             for card in ready:
@@ -507,6 +506,13 @@ class OpenIntake:
                 card["conversationName"] = str(group["name"])
                 break
         apply_display(card, settings)
+        watched = any(
+            group.get("id") == card["conversationId"] for group in settings.get("groups") or []
+        )
+        if not watched:
+            # 未监控的群：只入库和计入统计，不推给页面，也不打 GMGN 解析合约。
+            self.hub.publish(card, notify=False)
+            return
         # 带 CA 的消息和微信消息一样走 TokenIndex 实时解析：每个新 CA 约 search 1 + info 1
         # = 2 权重，同一个币 2 秒内命中缓存；限频窗口统一记账，后台刷榜会自动让开。
         # 推送端按每分钟 20 个新 CA 估算约 0.7 权重/秒，仍在免费档 5 权重/秒以内。
@@ -625,13 +631,13 @@ def create_open_app(store: SettingsStore, intake: OpenIntake) -> FastAPI:
             )
         out = intake.submit(payload, ip)
         logger.info(
-            "开放接口收到 {} 条 platform={} ip={} 入队 {} 重复 {} 未监控 {} 拒收 {}",
+            "开放接口收到 {} 条 platform={} ip={} 入队 {} 重复 {} 未监控仅入库 {} 拒收 {}",
             count,
             out["platform"],
             ip,
             out["accepted"],
             out["duplicate"],
-            out["ignored"],
+            out["stored"],
             out["rejected"],
         )
         return out

@@ -82,7 +82,7 @@ function render(data) {
     kpi("请求", s.requests || 0),
     kpi("入队", s.accepted || 0, `队列中 ${data.queue || 0}`),
     kpi("重复（已忽略）", s.duplicate || 0),
-    kpi("群未监控", s.ignored || 0),
+    kpi("未监控仅入库", s.stored || 0),
     kpi("拒收", s.rejected || 0, "", s.rejected ? "warn" : ""),
     kpi("签名失败", s.authFailed || 0, s.lastError || "", s.authFailed ? "bad" : ""),
   ].join("");

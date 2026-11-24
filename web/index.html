@@ -8,7 +8,7 @@
     <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
     <link rel="icon" href="/assets/favicon.png" type="image/png" sizes="128x128" />
     <link rel="apple-touch-icon" href="/assets/favicon.png" />
-    <link rel="stylesheet" href="/assets/app.css?v=0.9.39" />
+    <link rel="stylesheet" href="/assets/app.css?v=0.9.40" />
   </head>
   <body>
     <header class="top">
@@ -29,6 +29,7 @@
       <div id="runtime" class="runtime">正在连接</div>
       <nav class="author">
         <a href="/gmgn" target="_blank" rel="noreferrer" title="GMGN 接口调用次数、频率、成功失败与限频余量">GMGN 用量</a>
+        <a href="/stats" target="_blank" rel="noreferrer" title="微信群和开放接口群的消息量、群排行、发言人排行、时段分布">消息统计</a>
         <a href="/data" target="_blank" rel="noreferrer" title="排行榜与 GMGN 调用记录：保留 1 年，可按时间段删除">数据管理</a>
         <a href="/open" target="_blank" rel="noreferrer" title="让局域网里的其他程序把 Telegram / Discord / QQ 等群消息推进来">开放接口</a>
         <a href="https://x.com/0xTechMelon" target="_blank" rel="noreferrer">𝕏 @0xTechMelon</a>
@@ -146,7 +147,7 @@
           </label>
           <div id="directory" class="directory"></div>
           <div id="open-directory" class="open-directory" hidden>
-            <p class="group-hint">开放接口推送过、还没加入监控的群（新群默认不显示）。勾选即加入监控，之后推送的消息才会显示。<a href="/open" target="_blank" rel="noreferrer">开放接口设置</a></p>
+            <p class="group-hint">开放接口推送过、还没加入监控的群（新群默认不显示）。消息已经入库，勾选加入监控后连同历史消息一起显示。<a href="/open" target="_blank" rel="noreferrer">开放接口设置</a></p>
             <div id="open-directory-list" class="directory"></div>
           </div>
         </div>
@@ -161,7 +162,7 @@
       技术瓜群流 · 作者 <a href="https://x.com/0xTechMelon" target="_blank" rel="noreferrer">@0xTechMelon</a>
       · 更多产品见 <a href="https://docs.jishugua.top" target="_blank" rel="noreferrer">docs.jishugua.top</a>
     </footer>
-    <script src="/shared/feed.js?v=0.9.39"></script>
-    <script src="/assets/app.js?v=0.9.39"></script>
+    <script src="/shared/feed.js?v=0.9.40"></script>
+    <script src="/assets/app.js?v=0.9.40"></script>
   </body>
 </html>

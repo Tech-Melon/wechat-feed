@@ -185,15 +185,18 @@ def test_open_push_flow(env) -> None:
     raw, headers = _signed(env["key"], body)
     out = lan.post(PATH, content=raw, headers=headers)
     assert out.status_code == 200, out.text
-    assert out.json()["ignored"] == 1
-    assert intake.queue.empty()
+    # 未监控的群也入库（不显示），重复推送按 id 去重。
+    assert out.json()["stored"] == 1
+    _drain(intake)
     assert any(chat["id"] == "telegram:-1001234567" for chat in intake.directory.chats())
+    hidden = main.get("/api/messages", params={"limit": 10}).json()["messages"]
+    assert not any(card["id"].startswith("telegram:") for card in hidden)
 
     store.replace({"groups": [{"id": "telegram:-1001234567", "name": ""}]})
     later = {"platform": "telegram", "messages": [_message(id="8813"), _message()]}
     raw, headers = _signed(env["key"], later)
     out = lan.post(PATH, content=raw, headers=headers).json()
-    assert out["accepted"] == 2
+    assert out["accepted"] == 1 and out["duplicate"] == 1
     _drain(intake)
 
     page = main.get("/api/messages", params={"limit": 10}).json()["messages"]
@@ -317,7 +320,7 @@ def test_auto_watch_adds_only_new_chats(env) -> None:
     store: SettingsStore = env["store"]
     intake: OpenIntake = env["intake"]
     raw, headers = _signed(env["key"], {"platform": "telegram", "messages": [_message()]})
-    assert lan.post(PATH, content=raw, headers=headers).json()["ignored"] == 1
+    assert lan.post(PATH, content=raw, headers=headers).json()["stored"] == 1
 
     store.replace({"open_auto_watch": ["telegram"]})
     fresh = _message(id="1", chat={"id": "-1009", "name": "新群"})
@@ -325,13 +328,13 @@ def test_auto_watch_adds_only_new_chats(env) -> None:
     raw, headers = _signed(env["key"], body)
     out = lan.post(PATH, content=raw, headers=headers).json()
     # 新群自动加入并入库；之前见过、没加监控的群保持不显示。
-    assert [r["status"] for r in out["results"]] == ["accepted", "ignored"]
+    assert [r["status"] for r in out["results"]] == ["accepted", "stored"]
     assert [g["id"] for g in store.get()["groups"]] == ["telegram:-1009"]
     _drain(intake)
 
     other = {"platform": "qq", "messages": [_message(id="3", chat={"id": "777"})]}
     raw, headers = _signed(env["key"], other)
-    assert lan.post(PATH, content=raw, headers=headers).json()["ignored"] == 1
+    assert lan.post(PATH, content=raw, headers=headers).json()["stored"] == 1
     with pytest.raises(ValueError):
         normalize_settings({"open_auto_watch": ["Bad Name"]})
 
@@ -346,7 +349,7 @@ def test_forgotten_chat_is_not_auto_watched(env) -> None:
     assert not intake.directory.chats()
     store.replace({"open_auto_watch": ["telegram"]})
     raw, headers = _signed(env["key"], {"platform": "telegram", "messages": [_message(id="5")]})
-    assert lan.post(PATH, content=raw, headers=headers).json()["ignored"] == 1
+    assert lan.post(PATH, content=raw, headers=headers).json()["stored"] == 1
     assert store.get()["groups"] == []
     assert [chat["id"] for chat in intake.directory.chats()] == ["telegram:-1001234567"]
 

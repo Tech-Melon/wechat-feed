@@ -704,7 +704,7 @@ function renderOpenDirectory() {
       name.append(document.createTextNode(groupLabel(chat.id, chat.name || "未命名群")));
       const meta = document.createElement("span");
       meta.textContent = `${chat.id} · ${chat.messages || 0} 条推送`;
-      label.title = "勾选加入监控，之后推送的消息会显示在信息流里";
+      label.title = "勾选加入监控，已入库的历史消息和之后的推送都会显示在信息流里";
       label.append(check, name, meta);
       check.addEventListener("change", () => {
         if (!check.checked) return;
@@ -1848,6 +1848,8 @@ source.onmessage = (event) => {
     state.feeds.ca = emptyFeedCache();
     syncViewFromCache();
     renderFeed();
+    // 清空或在数据管理里删了一段消息：重新拉第一页，不留空白。
+    loadFeed({ reset: true, caOnly: Boolean(state.settings.ca_only) }).catch(() => {});
     return;
   }
   if (payload.type === "patch" && payload.card) {

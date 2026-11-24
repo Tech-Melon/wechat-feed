@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <title>消息统计 · 技术瓜群流</title>
+    <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/assets/gmgn.css?v=0.9.40" />
+    <style>
+      .st-bar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+      .st-filters { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 13px; }
+      .st-chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; background: #eef4ff; color: #175cd3; font-size: 12px; }
+      .st-chip button { border: 0; background: transparent; color: inherit; cursor: pointer; font: inherit; padding: 0; }
+      .st-chart svg { display: block; width: 100%; height: 220px; }
+      .st-chart .axis { fill: var(--muted); font-size: 11px; }
+      .st-chart .grid { stroke: #f2f4f7; }
+      .st-chart .bar { fill: #98a2b3; }
+      .st-chart .bar.ca { fill: #e5484d; }
+      .st-hours svg { height: 140px; }
+      .st-link { border: 0; background: transparent; padding: 0; color: #175cd3; cursor: pointer; font: inherit; text-align: left; }
+      .st-link:hover { text-decoration: underline; }
+      .st-tag { display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 4px; background: #f2f4f7; color: var(--muted); font-size: 11px; }
+      .st-plat { display: inline-block; margin-right: 6px; padding: 0 5px; border-radius: 4px; background: #667085; color: #fff; font-size: 10px; font-weight: 800; line-height: 16px; }
+      .st-grid2 { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); }
+    </style>
+  </head>
+  <body>
+    <header class="gm-top">
+      <a class="gm-back" href="/">← 返回群流</a>
+      <div class="gm-title">
+        <h1>消息统计</h1>
+        <p>微信群和开放接口推送的群消息，按小时汇总。消息保留半年，统计同步保留。</p>
+      </div>
+      <div class="gm-seg" role="tablist" aria-label="统计时间" id="st-range">
+        <button type="button" data-range="today">今天</button>
+        <button type="button" data-range="7d">7 天</button>
+        <button type="button" data-range="30d">30 天</button>
+        <button type="button" data-range="180d">半年</button>
+      </div>
+    </header>
+
+    <main class="gm-main">
+      <section class="gm-card">
+        <div class="st-bar">
+          <div class="gm-seg" role="tablist" aria-label="来源" id="st-source"></div>
+          <div class="st-filters" id="st-filters"></div>
+        </div>
+      </section>
+
+      <section class="gm-kpis" id="st-kpis"></section>
+
+      <section class="gm-card">
+        <header class="gm-card-head">
+          <h2>每天消息量</h2>
+          <div class="gm-legend"><span><i class="sw" style="background:#98a2b3"></i>全部消息</span><span><i class="sw" style="background:#e5484d"></i>含合约</span></div>
+        </header>
+        <div id="st-daily" class="st-chart"></div>
+      </section>
+
+      <section class="gm-card">
+        <header class="gm-card-head">
+          <h2>时段分布</h2>
+          <p class="gm-muted">本机时间，每小时的消息数</p>
+        </header>
+        <div id="st-hours" class="st-chart st-hours"></div>
+      </section>
+
+      <div class="st-grid2">
+        <section class="gm-card">
+          <header class="gm-card-head">
+            <h2>群排行</h2>
+            <p class="gm-muted">前 50，点群名只看这个群</p>
+          </header>
+          <div class="gm-scroll">
+            <table class="gm-table">
+              <thead><tr><th>群</th><th>消息</th><th>含合约</th><th>发言人</th><th>最后活跃</th></tr></thead>
+              <tbody id="st-groups"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="gm-card">
+          <header class="gm-card-head">
+            <h2>发言人排行</h2>
+            <p class="gm-muted">前 50，点名字看他在哪些群发言</p>
+          </header>
+          <div class="gm-scroll">
+            <table class="gm-table">
+              <thead><tr><th>发言人</th><th>消息</th><th>含合约</th><th>群</th><th>最后活跃</th></tr></thead>
+              <tbody id="st-senders"></tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+      <p class="gm-foot">统计包含未加入监控的开放接口群（标「未监控」）；样例消息不计入。删除消息请到 <a href="/data">数据管理</a>。</p>
+    </main>
+    <script src="/shared/feed.js?v=0.9.40"></script>
+    <script src="/assets/stats.js?v=0.9.40"></script>
+  </body>
+</html>

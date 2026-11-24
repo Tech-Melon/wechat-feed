@@ -6,14 +6,14 @@
     <meta name="robots" content="noindex" />
     <title>数据管理 · 技术瓜群流</title>
     <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
-    <link rel="stylesheet" href="/assets/gmgn.css?v=0.9.39" />
+    <link rel="stylesheet" href="/assets/gmgn.css?v=0.9.40" />
   </head>
   <body>
     <header class="gm-top">
       <a class="gm-back" href="/">← 返回群流</a>
       <div class="gm-title">
         <h1>数据管理</h1>
-        <p>排行榜（data/ca.db）与 GMGN 调用记录（data/gmgn.db）都保留 1 年，过期自动清理。这里可以手动删除某段时间。</p>
+        <p>群消息（data/feed.db，含消息统计）保留半年；排行榜（data/ca.db）与 GMGN 调用记录（data/gmgn.db）保留 1 年，过期自动清理。这里可以手动删除某段时间。</p>
       </div>
       <a class="gm-back" href="/gmgn">GMGN 用量 →</a>
     </header>
@@ -27,9 +27,10 @@
         <form id="dm-form" class="dm-form">
           <label>数据
             <select id="dm-target">
+              <option value="messages">群消息（微信 + 开放接口）</option>
               <option value="board">排行榜喊单</option>
               <option value="gmgn">GMGN 调用记录</option>
-              <option value="all">两者都删</option>
+              <option value="all">以上全部</option>
             </select>
           </label>
           <label>快捷
@@ -48,6 +49,15 @@
           <button type="submit">预览</button>
         </form>
         <div id="dm-preview" class="dm-preview" role="status" aria-live="polite"></div>
+      </section>
+
+      <section class="gm-card">
+        <header class="gm-card-head">
+          <h2>群消息</h2>
+          <p id="dm-msg-meta" class="gm-muted"></p>
+        </header>
+        <div class="gm-scroll"><table class="gm-table" id="dm-msg"></table></div>
+        <p class="gm-hint">删除群消息会同时重算这段时间的消息统计；排行榜里的喊单记录不受影响。微信库里还在的消息，如果删的是每个群最新的那段，下次重启会从微信库重新拉回来。</p>
       </section>
 
       <section class="gm-card">
@@ -73,10 +83,10 @@
           <h2>压缩数据库</h2>
           <button id="dm-vacuum" type="button" class="dm-btn">立即压缩</button>
         </header>
-        <p class="gm-hint">删除后 SQLite 文件不会马上变小，压缩一次即可回收空间。数据多时可能要几秒。</p>
+        <p class="gm-hint">删除后 SQLite 文件不会马上变小，压缩一次即可回收空间。群消息库较大，压缩可能要十几秒，期间信息流会暂停接收，压缩完自动恢复。</p>
         <p id="dm-vacuum-out" class="gm-muted" role="status" aria-live="polite"></p>
       </section>
     </main>
-    <script src="/assets/data.js?v=0.9.39"></script>
+    <script src="/assets/data.js?v=0.9.40"></script>
   </body>
 </html>

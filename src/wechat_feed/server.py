@@ -22,6 +22,7 @@ from loguru import logger
 from . import http as feed_http
 from .castore import BOARD_RANGES, REFRESH_MAX, USER_RANGES, CaStore
 from .config import (
+    OPEN_PLATFORM,
     SettingsStore,
     data_dir,
     display_group_ids,
@@ -33,6 +34,7 @@ from .config import (
 from .direct import DirectSource
 from .gmgnstore import HISTORY_RANGES, GmgnStore
 from .hub import Hub
+from .msgstats import RANGES as STAT_RANGES
 from .normalize import normalize_message_event
 from .openapi import (
     API_VERSION,
@@ -79,7 +81,7 @@ _USER_ID = re.compile(r"^[A-Za-z0-9_@.\-]{1,80}$")
 # GMGN 计量每 5 秒批量落盘一次，每 6 小时清一次过期数据。
 _METER_FLUSH = 5.0
 _METER_PRUNE = 6 * 3600
-_PURGE_TARGETS = {"board", "gmgn", "all"}
+_PURGE_TARGETS = {"board", "gmgn", "messages", "all"}
 
 
 async def _flush_meter(stop: asyncio.Event, tokens: TokenIndex, gm: GmgnStore) -> None:
@@ -907,7 +909,54 @@ def create_app() -> FastAPI:
     async def data_summary() -> dict[str, Any]:
         board = await asyncio.to_thread(cas.data_summary)
         gmgn = await asyncio.to_thread(gmgn_db.summary)
-        return {"ok": True, "board": board, "gmgn": gmgn}
+        messages = await asyncio.to_thread(persist.data_summary)
+        return {"ok": True, "board": board, "gmgn": gmgn, "messages": messages}
+
+    @app.get("/api/stats")
+    async def message_stats(
+        range: str = "7d",  # noqa: A002 - 查询参数名
+        source: str = "all",
+        group: str = "",
+        sender: str = "",
+    ) -> dict[str, Any]:
+        """群消息统计：读 feed.db 的小时汇总表，不扫原始消息。"""
+        window = range if range in STAT_RANGES else "7d"
+        source = str(source or "all").strip()
+        if source not in {"all", "wechat"} and not OPEN_PLATFORM.match(source):
+            raise HTTPException(status_code=400, detail="source 不合法")
+        group = str(group or "").strip()
+        if group:
+            try:
+                group = validate_group_id(group)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        sender = str(sender or "").strip()
+        if sender and not (_USER_ID.match(sender) or is_open_id(sender)):
+            raise HTTPException(status_code=400, detail="发言人不合法")
+        data = await asyncio.to_thread(
+            persist.stats.query,
+            window=window,
+            source=source,
+            conversation_id=group,
+            sender=sender,
+        )
+        settings = store.get()
+        group_remarks = settings.get("group_remarks") or {}
+        user_remarks = settings.get("user_remarks") or {}
+        watched = {
+            str(item.get("id") or ""): str(item.get("name") or "")
+            for item in settings.get("groups") or []
+        }
+        for row in data["groups"]:
+            ident = row["id"]
+            raw = row["name"] if row["name"] and not row["name"].endswith("@chatroom") else ""
+            row["name"] = group_remarks.get(ident) or watched.get(ident) or raw or "未命名群"
+            row["watched"] = ident in watched
+            row["blocked"] = ident in set(settings.get("blocked_groups") or [])
+        for row in data["senders"]:
+            row["name"] = user_remarks.get(row["id"]) or row["name"] or row["id"]
+            row["starred"] = row["id"] in set(settings.get("starred_users") or [])
+        return {"ok": True, **data}
 
     async def _json_body(request: Request) -> dict[str, Any]:
         # 只收 application/json：跨站表单 POST 发不了这个类型，必须先过 CORS 预检，网页删不了数据。
@@ -927,7 +976,9 @@ def create_app() -> FastAPI:
         body = await _json_body(request)
         target = str(body.get("target") or "")
         if target not in _PURGE_TARGETS:
-            raise HTTPException(status_code=400, detail="target 只能是 board / gmgn / all")
+            raise HTTPException(
+                status_code=400, detail="target 只能是 board / gmgn / messages / all"
+            )
         try:
             start = int(body.get("start"))
             end = int(body.get("end"))
@@ -944,6 +995,11 @@ def create_app() -> FastAPI:
             if not dry_run:
                 token_index.meter.forget(start, end)
             out["gmgn"] = await asyncio.to_thread(gmgn_db.purge, start, end, dry_run)
+        if target in {"messages", "all"}:
+            out["messages"] = await asyncio.to_thread(persist.purge, start, end, dry_run)
+            if not dry_run:
+                hub.forget_range(start, end)
+                hub.notify_reload()
         if not dry_run:
             logger.info("手动删除数据 target={} {}~{}", target, start, end)
             if target in {"board", "all"}:
@@ -955,7 +1011,8 @@ def create_app() -> FastAPI:
         await _json_body(request)
         board = await asyncio.to_thread(cas.vacuum)
         gmgn = await asyncio.to_thread(gmgn_db.vacuum)
-        return {"ok": True, "boardBytes": board, "gmgnBytes": gmgn}
+        messages = await asyncio.to_thread(persist.vacuum)
+        return {"ok": True, "boardBytes": board, "gmgnBytes": gmgn, "messageBytes": messages}
 
     @app.get("/api/open-api")
     async def open_api_state() -> dict[str, Any]:
@@ -1004,6 +1061,10 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="群 ID 不合法")
         removed = await asyncio.to_thread(open_dir.forget_chat, chat_id)
         return {"ok": True, "removed": removed}
+
+    @app.get("/stats")
+    def stats_page() -> FileResponse:
+        return FileResponse(root / "web" / "stats.html", headers={"Cache-Control": "no-store"})
 
     @app.get("/open")
     def open_page() -> FileResponse:
