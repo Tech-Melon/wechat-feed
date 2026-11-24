@@ -358,3 +358,53 @@ def test_forgotten_chat_is_not_auto_watched(env) -> None:
     raw, headers = _signed(env["key"], {"platform": "telegram", "messages": [bad]})
     assert lan.post(PATH, content=raw, headers=headers).json()["rejected"] == 1
     assert "telegram:-2002" in intake.directory.known(["telegram:-2002"])
+
+
+class _FakeTokens:
+    """代替 TokenIndex：不打网络，直接返回一个已解析的代币。"""
+
+    async def resolve_many(self, cas, on_partial=None):
+        return [
+            {
+                "address": item["address"],
+                "chain": "bsc",
+                "symbol": "WBNB",
+                "marketCap": 5000,
+                "athMarketCap": 5000,
+            }
+            for item in cas
+        ]
+
+
+def test_open_ca_flows_to_board_and_sse(env) -> None:
+    store: SettingsStore = env["store"]
+    intake: OpenIntake = env["intake"]
+    hub = intake.hub
+    intake.tokens = _FakeTokens()
+    store.replace({"groups": [{"id": "qq:5", "name": ""}]})
+    watched = _message(id="m1", chat={"id": "5", "name": "QQ 群"}, sender={"id": "9", "name": "Q"})
+    watched["text"] = f"冲 {CA}"
+    hidden = _message(id="m2", chat={"id": "6"}, sender={"id": "9", "name": "Q"})
+    hidden["text"] = f"冲 {CA}"
+
+    async def scenario() -> list[dict]:
+        queue = hub.subscribe()
+        intake.submit({"platform": "qq", "messages": [watched, hidden]}, "192.168.1.20")
+        _drain(intake)
+        await asyncio.sleep(0.05)
+        events = []
+        while not queue.empty():
+            events.append(queue.get_nowait())
+        hub.unsubscribe(queue)
+        return events
+
+    events = asyncio.run(scenario())
+    pushed = [e["card"]["id"] for e in events if e["type"] == "message"]
+    # 监控群的 CA 消息推给页面（提示音和插件都靠这条），未监控群的不推。
+    assert pushed == ["qq:5:m1"]
+    patched = [e["card"] for e in events if e["type"] == "patch" and e["card"]["id"] == "qq:5:m1"]
+    assert patched and patched[-1]["tokenCards"][0]["symbol"] == "WBNB"
+    assert patched[-1]["tokenCards"][0]["foundById"] == "qq:9"
+    profile = env["main"].get("/api/ca-board/user/qq:9").json()
+    assert [call["address"].lower() for call in profile["calls"]] == [CA]
+    assert all(e["card"]["id"] != "qq:6:m2" for e in events if "card" in e)
