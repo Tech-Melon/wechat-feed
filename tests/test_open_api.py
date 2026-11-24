@@ -70,11 +70,11 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         hub: Hub = app.state.hub
         key = new_key()
         store.replace({"open_api_enabled": True, "open_api_key": key})
-        directory = OpenDirectory(tmp_path / "open-test.db", tmp_path / "open_media")
+        # 和主服务共用同一个目录，/api/open-api 能看到测试推送的群。
+        directory: OpenDirectory = app.state.open_dir
         intake = OpenIntake(store, hub, TokenIndex(lambda: ""), directory)
         lan = TestClient(create_open_app(store, intake), client=("192.168.1.20", 50000))
         yield {"main": main, "lan": lan, "store": store, "intake": intake, "key": key}
-        directory.close()
 
 
 def _drain(intake: OpenIntake) -> None:
@@ -218,6 +218,11 @@ def test_main_app_open_key_and_host_guard(env) -> None:
     main: TestClient = env["main"]
     settings = main.get("/api/settings").json()
     assert "open_api_key" not in settings and settings["has_open_key"] is True
+    lan: TestClient = env["lan"]
+    raw, headers = _signed(env["key"], {"platform": "telegram", "messages": [_message()]})
+    lan.post(PATH, content=raw, headers=headers)
+    chat = main.get("/api/open-api").json()["chats"][0]
+    assert chat["messages"] == 1 and chat["lastSeen"] and chat["platformName"] == "Telegram"
     main.put("/api/settings", json={"open_api_key": "wfo_" + "y" * 43})
     assert env["store"].get()["open_api_key"] == env["key"]
     rotated = main.post("/api/open-api/key", json={"action": "rotate"}).json()

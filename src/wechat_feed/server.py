@@ -378,6 +378,7 @@ def create_app() -> FastAPI:
     app.state.store = store
     app.state.hub = hub
     app.state.persist = persist
+    app.state.open_dir = open_dir
 
     def _token_needs_gmgn(card: dict[str, Any]) -> bool:
         if not card.get("cas"):
@@ -787,15 +788,9 @@ def create_app() -> FastAPI:
         persist.clear()
         return {"ok": True}
 
-    def _open_groups() -> list[dict[str, str]]:
+    def _open_groups() -> list[dict[str, Any]]:
         return [
-            {
-                "id": item["id"],
-                "name": item["name"],
-                "platform": item["platform"],
-                "platformName": platform_name(item["platform"]),
-            }
-            for item in open_dir.chats()
+            {**item, "platformName": platform_name(item["platform"])} for item in open_dir.chats()
         ]
 
     @app.get("/api/groups")
