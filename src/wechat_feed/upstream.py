@@ -11,7 +11,7 @@ from urllib.parse import quote, urlencode
 import httpx
 from loguru import logger
 
-from .config import SettingsStore
+from .config import SettingsStore, wechat_groups
 from .direct import DirectSource, direct_backfill, direct_disabled, direct_stream
 from .http import client as http_client
 from .hub import Hub
@@ -71,7 +71,7 @@ def _describe_failure(exc: BaseException) -> str:
 
 
 def _allowed(settings: dict[str, Any], conversation_id: str) -> bool:
-    groups = list(settings.get("groups") or [])
+    groups = wechat_groups(settings)
     if not groups:
         return conversation_id.endswith("@chatroom")
     return conversation_id in {str(item["id"]) for item in groups}
@@ -115,9 +115,7 @@ def apply_display(card: dict[str, Any], settings: dict[str, Any]) -> dict[str, A
 
 async def fetch_upstream_groups(upstream_base: str) -> list[dict[str, str]]:
     url = f"{upstream_base.rstrip('/')}/api/chat/sessions"
-    response = await http_client().get(
-        url, params={"source": "realtime"}, timeout=_SESSION_TIMEOUT
-    )
+    response = await http_client().get(url, params={"source": "realtime"}, timeout=_SESSION_TIMEOUT)
     response.raise_for_status()
     return extract_groups(response.json())
 
@@ -190,7 +188,7 @@ async def _pull_watched_groups(
     hub: Hub,
     token_index: TokenIndex,
 ) -> None:
-    groups = list(settings.get("groups") or [])
+    groups = wechat_groups(settings)
     if not groups:
         return
     base = str(settings["upstream_base"]).rstrip("/")
@@ -370,7 +368,7 @@ async def backfill_history(
     direct: DirectSource | None = None,
 ) -> None:
     settings = settings_store.get()
-    groups = list(settings.get("groups") or [])
+    groups = wechat_groups(settings)
     reader = await direct.reader(str(settings["upstream_base"])) if direct else None
     if not groups:
         try:
@@ -498,7 +496,7 @@ async def _stream_round(
             pull_event.clear()
             last = time.time()
             settings = settings_store.get()
-            if not settings.get("groups"):
+            if not wechat_groups(settings):
                 continue
             try:
                 await _pull_watched_groups(client, settings, settings_store, hub, token_index)
@@ -512,7 +510,7 @@ async def _stream_round(
         asyncio.create_task(_keep_loop("changes", hub, stop, live, changes_worker)),
         asyncio.create_task(pull_worker()),
     ]
-    if not settings.get("groups"):
+    if not wechat_groups(settings):
         tasks.append(asyncio.create_task(_keep_loop("messages", hub, stop, live, messages_worker)))
     try:
         await asyncio.gather(*tasks)
@@ -530,7 +528,7 @@ async def _pause(seconds: float, stop: asyncio.Event) -> None:
 
 
 def _watched_rooms(settings: dict[str, Any]) -> set[str] | None:
-    groups = settings.get("groups") or []
+    groups = wechat_groups(settings)
     if not groups:
         return None
     return {str(item["id"]) for item in groups if str(item.get("id") or "").endswith("@chatroom")}
@@ -648,7 +646,7 @@ async def supervise(
         settings = settings_store.get()
         current = (
             settings["upstream_base"],
-            tuple(item["id"] for item in settings["groups"]),
+            tuple(item["id"] for item in wechat_groups(settings)),
         )
         if current != signature:
             signature = current

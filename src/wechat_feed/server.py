@@ -14,6 +14,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
@@ -25,6 +26,7 @@ from .config import (
     data_dir,
     display_group_ids,
     group_senders_by_id,
+    is_open_id,
     project_root,
     validate_group_id,
 )
@@ -32,6 +34,17 @@ from .direct import DirectSource
 from .gmgnstore import HISTORY_RANGES, GmgnStore
 from .hub import Hub
 from .normalize import normalize_message_event
+from .openapi import (
+    API_VERSION,
+    OpenIntake,
+    OpenListener,
+    create_open_app,
+    key_hint,
+    lan_addresses,
+    new_key,
+    platform_name,
+)
+from .opendir import OpenDirectory, valid_image_ref
 from .store import CardStore
 from .tokens import TokenIndex, allowed_chainicon_url, chain_favicon, manual_timeout
 from .upstream import apply_display, backfill_history, fetch_upstream_groups, supervise
@@ -239,7 +252,14 @@ def public_settings(settings: dict[str, Any]) -> dict[str, Any]:
     payload = dict(settings)
     payload["has_gmgn_key"] = bool(settings.get("gmgn_api_key"))
     payload["gmgn_api_key"] = ""
+    open_key = str(payload.pop("open_api_key", "") or "")
+    payload["has_open_key"] = bool(open_key)
+    payload["open_api_key_hint"] = key_hint(open_key)
     return payload
+
+
+# 这些字段只能由「开放接口」页的生成密钥按钮改，PUT /api/settings 里出现就忽略。
+_SETTINGS_READONLY = {"open_api_key", "has_open_key", "open_api_key_hint", "has_gmgn_key"}
 
 
 def demo_event() -> dict[str, Any]:
@@ -279,7 +299,15 @@ def create_app() -> FastAPI:
     gmgn_db = GmgnStore(data_dir() / "gmgn.db")
     refresh_job = RefreshJob()
     direct = DirectSource(data_dir() / "direct.json")
+    open_dir = OpenDirectory(data_dir() / "open.db", data_dir() / "open_media")
+    intake = OpenIntake(store, hub, token_index, open_dir)
+    listener = OpenListener(lambda: create_open_app(store, intake))
+    open_disabled = os.environ.get("WECHAT_FEED_DISABLE_OPEN") == "1"
     root = project_root()
+
+    async def apply_listener(settings: dict[str, Any]) -> None:
+        if not open_disabled:
+            await listener.apply(settings)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -296,12 +324,16 @@ def create_app() -> FastAPI:
         if dropped:
             logger.info("已丢弃异常历史 CA {} 条", dropped)
         gmgn_db.prune()
+        await asyncio.to_thread(open_dir.prune)
         # 重启后把最近 1 小时的明细装回内存，用量页不会清零。
         token_index.meter.preload(gmgn_db.load_recent(3600))
         stop = asyncio.Event()
         tasks: list[asyncio.Task[None]] = [
-            asyncio.create_task(_flush_meter(stop, token_index, gmgn_db))
+            asyncio.create_task(_flush_meter(stop, token_index, gmgn_db)),
+            asyncio.create_task(intake.run(stop)),
         ]
+        if not open_disabled:
+            tasks.append(asyncio.create_task(listener.watch(store, stop)))
         if os.environ.get("WECHAT_FEED_DISABLE_UPSTREAM") != "1":
             tasks.append(asyncio.create_task(backfill_history(store, hub, stop, direct)))
             tasks.append(asyncio.create_task(supervise(store, hub, stop, token_index, direct)))
@@ -313,6 +345,7 @@ def create_app() -> FastAPI:
             )
         yield
         stop.set()
+        await listener.close()
         for task in tasks:
             task.cancel()
         if tasks:
@@ -322,9 +355,13 @@ def create_app() -> FastAPI:
         if batch:
             gmgn_db.write(batch, stats)
         gmgn_db.close()
+        hub.flush()
+        open_dir.close()
         await feed_http.aclose()
 
     app = FastAPI(title="技术瓜群流", lifespan=lifespan)
+    # 只认 127.0.0.1 / localhost 的 Host 头，挡住 DNS rebinding（恶意域名解析到本机后同源读接口）。
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])
     # 网页不能跨源读群消息；只放行浏览器扩展，本地页是同源。
     app.add_middleware(
         CORSMiddleware,
@@ -385,12 +422,15 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="配置不是合法 JSON") from exc
         if not isinstance(patch, dict):
             raise HTTPException(status_code=400, detail="配置必须是对象")
+        patch = {key: value for key, value in patch.items() if key not in _SETTINGS_READONLY}
         try:
             settings = store.replace(patch)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         public = public_settings(settings)
         hub.notify_settings(public)
+        if any(key.startswith("open_api_") for key in patch):
+            await apply_listener(settings)
         return public
 
     @app.get("/api/messages")
@@ -409,6 +449,11 @@ def create_app() -> FastAPI:
         allowed = None
         if not conversation_id and not include_all_groups:
             allowed = display_group_ids(settings, ca_only=ca_only) or None
+        open_watched = [
+            str(item.get("id") or "")
+            for item in settings.get("groups") or []
+            if is_open_id(str(item.get("id") or ""))
+        ]
 
         def build() -> tuple[list[dict[str, Any]], bool, int]:
             cards, more = persist.page(
@@ -421,6 +466,7 @@ def create_app() -> FastAPI:
                 ca_only=ca_only,
                 senders_by_group=senders or None,
                 blocked_senders=blocked_senders or None,
+                open_watched=None if include_all_groups else open_watched,
             )
             out = [apply_display(dict(card), settings) for card in cards]
             for card in out:
@@ -463,6 +509,18 @@ def create_app() -> FastAPI:
     @app.get("/api/avatar")
     async def avatar(username: str) -> Response:
         ident = str(username or "").strip()
+        if is_open_id(ident):
+            # 开放接口的人和群：推送方给的头像地址，由本服务下载并缓存在 data/open_media。
+            found = await open_dir.avatar(ident)
+            if found is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="没有头像",
+                    headers={"Cache-Control": _AVATAR_MISS_CACHE},
+                )
+            return Response(
+                content=found[0], media_type=found[1], headers={"Cache-Control": _AVATAR_CACHE}
+            )
         if not _AVATAR_USER.match(ident):
             raise HTTPException(status_code=400, detail="用户名不合法")
         blob_path, mime_path, miss_path = _avatar_files(ident)
@@ -665,6 +723,21 @@ def create_app() -> FastAPI:
             headers={"Cache-Control": cache_header},
         )
 
+    @app.get("/api/openimg")
+    async def open_image(ref: str = "") -> Response:
+        if not valid_image_ref(ref):
+            raise HTTPException(status_code=400, detail="图片引用不合法")
+        found = await open_dir.image(ref)
+        if found is None:
+            raise HTTPException(
+                status_code=404, detail="图片读不到", headers={"Cache-Control": "no-store"}
+            )
+        return Response(
+            content=found[0],
+            media_type=found[1],
+            headers={"Cache-Control": "private, max-age=604800, immutable"},
+        )
+
     @app.get("/api/wxemoji")
     async def wx_sticker(md5: str, u: str = "") -> Response:
         if not valid_md5(md5):
@@ -708,10 +781,22 @@ def create_app() -> FastAPI:
         persist.clear()
         return {"ok": True}
 
+    def _open_groups() -> list[dict[str, str]]:
+        return [
+            {
+                "id": item["id"],
+                "name": item["name"],
+                "platform": item["platform"],
+                "platformName": platform_name(item["platform"]),
+            }
+            for item in open_dir.chats()
+        ]
+
     @app.get("/api/groups")
     async def get_groups() -> dict[str, Any]:
         settings = store.get()
         started = time.perf_counter()
+        extra = await asyncio.to_thread(_open_groups)
         try:
             reader = await direct.reader(str(settings["upstream_base"]))
             if reader is not None:
@@ -722,6 +807,8 @@ def create_app() -> FastAPI:
                 source = "wda"
         except Exception as exc:
             logger.info("读取群列表失败: {}", type(exc).__name__)
+            if extra:
+                return {"groups": extra, "warning": "读不到本机微信会话，只列出开放接口推送过的群"}
             raise HTTPException(
                 status_code=502,
                 detail="读不到本机微信会话。请确认 WeChatDataAnalysis 已启动并完成解密。",
@@ -732,7 +819,7 @@ def create_app() -> FastAPI:
             source,
             (time.perf_counter() - started) * 1000,
         )
-        return {"groups": groups}
+        return {"groups": groups + extra}
 
     @app.get("/api/groups/{group_id}/members")
     async def get_members(group_id: str) -> dict[str, Any]:
@@ -740,6 +827,9 @@ def create_app() -> FastAPI:
             room = validate_group_id(group_id)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if is_open_id(room):
+            members = await asyncio.to_thread(open_dir.members, room)
+            return {"groupId": room, "members": members}
         settings = store.get()
         started = time.perf_counter()
         reader = await direct.reader(str(settings["upstream_base"]))
@@ -868,6 +958,57 @@ def create_app() -> FastAPI:
         gmgn = await asyncio.to_thread(gmgn_db.vacuum)
         return {"ok": True, "boardBytes": board, "gmgnBytes": gmgn}
 
+    @app.get("/api/open-api")
+    async def open_api_state() -> dict[str, Any]:
+        settings = store.get()
+        chats = await asyncio.to_thread(_open_groups)
+        watched = {str(item.get("id") or "") for item in settings.get("groups") or []}
+        for chat in chats:
+            chat["watched"] = chat["id"] in watched
+        return {
+            "ok": True,
+            "version": API_VERSION,
+            "enabled": bool(settings.get("open_api_enabled")),
+            "hasKey": bool(settings.get("open_api_key")),
+            "keyHint": key_hint(str(settings.get("open_api_key") or "")),
+            "host": settings.get("open_api_host"),
+            "port": settings.get("open_api_port"),
+            "allowIps": settings.get("open_api_allow_ips") or [],
+            "lanAddresses": await asyncio.to_thread(lan_addresses),
+            "listener": dict(listener.state),
+            "queue": intake.depth(),
+            "stats": dict(intake.stats),
+            "chats": chats,
+        }
+
+    @app.post("/api/open-api/key")
+    async def open_api_key(request: Request) -> dict[str, Any]:
+        """生成 / 重置 / 清除密钥。新密钥只在这次响应里出现一次。"""
+        body = await _json_body(request)
+        action = str(body.get("action") or "rotate")
+        if action not in {"rotate", "clear"}:
+            raise HTTPException(status_code=400, detail="action 只能是 rotate / clear")
+        key = new_key() if action == "rotate" else ""
+        patch: dict[str, Any] = {"open_api_key": key}
+        if action == "clear":
+            patch["open_api_enabled"] = False
+        settings = store.replace(patch)
+        hub.notify_settings(public_settings(settings))
+        await apply_listener(settings)
+        logger.info("开放接口密钥已{}", "重置" if key else "清除")
+        return {"ok": True, "key": key, "keyHint": key_hint(key)}
+
+    @app.delete("/api/open-api/chats/{chat_id}")
+    async def open_api_forget(chat_id: str) -> dict[str, Any]:
+        if not is_open_id(chat_id):
+            raise HTTPException(status_code=400, detail="群 ID 不合法")
+        removed = await asyncio.to_thread(open_dir.forget_chat, chat_id)
+        return {"ok": True, "removed": removed}
+
+    @app.get("/open")
+    def open_page() -> FileResponse:
+        return FileResponse(root / "web" / "open.html", headers={"Cache-Control": "no-store"})
+
     @app.get("/data")
     def data_page() -> FileResponse:
         return FileResponse(root / "web" / "data.html", headers={"Cache-Control": "no-store"})
@@ -883,7 +1024,7 @@ def create_app() -> FastAPI:
     async def ca_board_refresh(user_id: str, request: Request) -> dict[str, Any]:
         """立即刷新某个用户的喊单：scope=pending 只刷待定，scope=range 刷 range 内全部。"""
         ident = str(user_id or "").strip()
-        if not _USER_ID.match(ident):
+        if not (_USER_ID.match(ident) or is_open_id(ident)):
             raise HTTPException(status_code=400, detail="用户名不合法")
         body = await _json_body(request)
         scope = str(body.get("scope") or "pending")
@@ -910,7 +1051,7 @@ def create_app() -> FastAPI:
     @app.get("/api/ca-board/user/{user_id}")
     def ca_board_user(user_id: str) -> dict[str, Any]:
         ident = str(user_id or "").strip()
-        if not _USER_ID.match(ident):
+        if not (_USER_ID.match(ident) or is_open_id(ident)):
             raise HTTPException(status_code=400, detail="用户名不合法")
         payload = cas.user_profile(ident)
         return {"ok": True, **payload}

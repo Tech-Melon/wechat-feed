@@ -839,6 +839,35 @@
     return `<div class="wf-avatar" ${dim}>${escapeText(initial(name))}</div>`;
   }
 
+  // 开放接口推进来的消息带 platform；微信消息没有这个字段，不显示角标。
+  const PLATFORM_STYLE = {
+    telegram: ["TG", "#229ed9"],
+    tg: ["TG", "#229ed9"],
+    discord: ["DC", "#5865f2"],
+    qq: ["QQ", "#12b7f5"],
+    slack: ["SL", "#4a154b"],
+    whatsapp: ["WA", "#25d366"],
+    line: ["LINE", "#06c755"],
+    x: ["X", "#0f1419"],
+    twitter: ["X", "#0f1419"],
+    dingtalk: ["钉", "#3296fa"],
+    feishu: ["飞", "#3370ff"],
+    lark: ["LK", "#3370ff"],
+    wecom: ["企", "#0082ef"],
+    matrix: ["MX", "#0dbd8b"],
+    signal: ["SG", "#3a76f0"],
+    kook: ["KK", "#7a56f5"],
+  };
+  function isOpenId(value) {
+    return /^[a-z][a-z0-9_-]{1,15}:/.test(String(value || ""));
+  }
+  function platformTag(card) {
+    const platform = String((card && card.platform) || "");
+    if (!platform) return "";
+    const [short, color] = PLATFORM_STYLE[platform] || [platform.slice(0, 2).toUpperCase(), `hsl(${hue(platform)} 55% 42%)`];
+    const label = card.platformName || platform;
+    return `<span class="wf-plat" style="--wf-plat:${escapeText(color)}" title="来自 ${escapeText(label)}">${escapeText(short)}</span>`;
+  }
   function identityHtml(card) {
     const name = card.displayName || card.senderName || "群成员";
     const group = card.displayGroup || card.conversationName || "群聊";
@@ -852,7 +881,7 @@
         <button type="button" class="${nameClass}" data-remark-user title="${escapeText(name)} · 点击备注此人">${escapeText(clipText(name, NAME_MAX))}</button>
         ${vip}
         <span class="wf-in">在</span>
-        <button type="button" class="${groupClass}" data-remark-group title="${escapeText(group)} · 点击给这个群写备注">${escapeText(clipText(group, GROUP_MAX))}</button>
+        ${platformTag(card)}<button type="button" class="${groupClass}" data-remark-group title="${escapeText(group)} · 点击给这个群写备注">${escapeText(clipText(group, GROUP_MAX))}</button>
         ${card.demo ? `<span class="wf-demo">样例</span>` : ""}
         <button type="button" class="${starClass}" data-star title="${starLabel}">${card.starred ? "★" : "☆"}</button>
         <button type="button" class="wf-mute" data-mute-user>不看此人</button>
@@ -1038,7 +1067,7 @@
           <button type="button" class="${nameClass}" data-remark-user title="${escapeText(name)} · 点击备注此人">${escapeText(clipText(name, NAME_MAX))}</button>
           ${card.starred ? `<span class="wf-starmark">★</span>` : ""}
           <span class="wf-in">在</span>
-          <button type="button" class="${groupClass}" data-remark-group title="${escapeText(group)} · 点击给这个群写备注">${escapeText(clipText(group, GROUP_MAX))}</button>
+          ${platformTag(card)}<button type="button" class="${groupClass}" data-remark-group title="${escapeText(group)} · 点击给这个群写备注">${escapeText(clipText(group, GROUP_MAX))}</button>
           ${card.demo ? `<span class="wf-demo">样例</span>` : ""}
         </div>
         <div class="wf-xside">
@@ -1091,6 +1120,7 @@
       .wf-name.is-remarked { font-style:italic; color:#175cd3; }
       .wf-group { padding:1px 8px; border-radius:999px; background:hsl(var(--wf-hue, 150) 42% 92%); color:hsl(var(--wf-hue, 150) 42% 28%); font-weight:700; }
       .wf-group:hover { filter:brightness(0.97); }
+      .wf-plat { display:inline-block; flex:none; margin-right:4px; padding:0 5px; border-radius:4px; background:var(--wf-plat, #667085); color:#fff; font-size:10px; font-weight:800; line-height:16px; vertical-align:middle; letter-spacing:.2px; }
       .wf-group.is-remarked { color:#175cd3; background:#e8f1ff; box-shadow:inset 0 0 0 1.5px #2e90fa; font-style:normal; font-weight:800; }
       .wf-group.is-remarked:hover { filter:none; background:#dce9ff; }
       .wf-vip, .wf-demo { padding:0 6px; border-radius:999px; font-size:11px; }
@@ -1395,8 +1425,12 @@
     const selected = feedGroupIds(settings, caOnly);
     if (selected.length) return selected.includes(card.conversationId);
     const monitored = monitoredGroupIds(settings);
-    if (!monitored.length || card.demo) return true;
-    return monitored.includes(card.conversationId);
+    if (card.demo) return true;
+    // 开放接口的群默认不显示，必须先加进监控；没配任何微信监控群时，微信消息仍是全显示。
+    if (isOpenId(card.conversationId)) return monitored.includes(card.conversationId);
+    const wechat = monitored.filter((id) => !isOpenId(id));
+    if (!wechat.length) return true;
+    return wechat.includes(card.conversationId);
   }
 
   // ---- 最近 CA：按地址去重，最新一次提及排前；同一地址在多群/多次发出时累计次数 ----
@@ -1611,7 +1645,7 @@
         ${avatar}
         ${who}
         ${callerStatsHtml(entry.callerStats, false)}
-        <span class="rc-in">${escapeText(clipText(group, GROUP_MAX))}</span>
+        <span class="rc-in">${platformTag(card)}${escapeText(clipText(group, GROUP_MAX))}</span>
       </div>
       ${found}
       ${recentContextHtml(card)}

@@ -90,6 +90,13 @@ class CardStore:
                 self._conn.commit()
                 self._dirty = 0
 
+    def exists(self, card_id: str) -> bool:
+        if not card_id:
+            return False
+        with self._lock:
+            row = self._conn.execute("SELECT 1 FROM cards WHERE id = ?", (card_id,)).fetchone()
+        return row is not None
+
     def flush(self) -> None:
         with self._lock:
             if self._dirty:
@@ -133,6 +140,7 @@ class CardStore:
         ca_only: bool = False,
         senders_by_group: dict[str, list[str]] | None = None,
         blocked_senders: list[str] | None = None,
+        open_watched: list[str] | None = None,
     ) -> tuple[list[dict[str, Any]], bool]:
         cutoff = self.cutoff()
         size = max(1, min(int(limit), 80))
@@ -153,6 +161,7 @@ class CardStore:
                 blocked=blocked,
                 allowed=allowed,
                 cutoff=cutoff,
+                open_watched=open_watched,
             )
             if not batch:
                 has_more = False
@@ -199,6 +208,7 @@ class CardStore:
         blocked: list[str] | None,
         allowed: list[str] | None,
         cutoff: int,
+        open_watched: list[str] | None = None,
     ) -> tuple[list[dict[str, Any]], bool]:
         blocked = blocked or []
         allowed = [item for item in (allowed or []) if item]
@@ -220,6 +230,17 @@ class CardStore:
             placeholders = ",".join("?" for _ in allowed)
             sql += f" AND conversation_id IN ({placeholders})"
             args.extend(allowed)
+        elif open_watched is not None:
+            # 没勾具体群时微信群全显示；开放接口的群（ID 带冒号）只显示已加入监控的。
+            watched = [item for item in open_watched if item]
+            if watched:
+                placeholders = ",".join("?" for _ in watched)
+                sql += (
+                    f" AND (instr(conversation_id, ':') = 0 OR conversation_id IN ({placeholders}))"
+                )
+                args.extend(watched)
+            else:
+                sql += " AND instr(conversation_id, ':') = 0"
         if blocked:
             placeholders = ",".join("?" for _ in blocked)
             sql += f" AND conversation_id NOT IN ({placeholders})"

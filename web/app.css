@@ -704,6 +704,20 @@ body {
   white-space: nowrap;
 }
 .wf-group:hover { filter: brightness(0.97); }
+/* 开放接口推进来的消息：群名前的平台角标（TG / DC / QQ …） */
+.wf-plat {
+  display: inline-block;
+  flex: none;
+  margin-right: 4px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: var(--wf-plat, #667085);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 16px;
+  vertical-align: middle;
+}
 .wf-group.is-remarked {
   color: #175cd3;
   background: #e8f1ff;

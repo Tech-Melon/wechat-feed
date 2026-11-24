@@ -629,6 +629,7 @@ function renderDirectory() {
     check.checked = watched.has(group.id);
     const name = document.createElement("strong");
     name.textContent = groupLabel(group.id, group.name || "未命名群");
+    if (group.platformName) name.textContent = `[${group.platformName}] ${name.textContent}`;
     const id = document.createElement("span");
     id.textContent = group.id;
     label.title = group.name && group.name !== name.textContent ? group.name : group.id;
@@ -1552,9 +1553,10 @@ document.querySelector("#load-groups").addEventListener("click", async () => {
     }
     renderDirectory();
     setNotice(
-      state.directory.length
-        ? "输入关键字筛选群。勾选加入监控，取消勾选即从监控里移除。"
-        : "没有读到群会话。",
+      payload.warning ||
+        (state.directory.length
+          ? "输入关键字筛选群。勾选加入监控，取消勾选即从监控里移除。"
+          : "没有读到群会话。"),
     );
   } catch (error) {
     setNotice(error.message);
@@ -1778,10 +1780,18 @@ source.onmessage = (event) => {
     return;
   }
   if (payload.type === "message" && payload.card) {
+    // 按发送时间插到正确位置：开放接口的消息可能晚到，不能一律放最顶上。
     const remember = (cache, card) => {
-      if (!cache.messages.some((item) => item.id === card.id)) {
-        cache.messages.unshift(card);
-      }
+      if (cache.messages.some((item) => item.id === card.id)) return;
+      const time = Number(card.createTime) || 0;
+      const received = Number(card.receivedAt) || 0;
+      const index = cache.messages.findIndex((item) => {
+        const other = Number(item.createTime) || 0;
+        return other < time || (other === time && (Number(item.receivedAt) || 0) < received);
+      });
+      if (index >= 0) cache.messages.splice(index, 0, card);
+      // 比已加载的都旧：还有下一页就留给翻页去取，免得打乱翻页游标。
+      else if (!cache.hasMore) cache.messages.push(card);
     };
     remember(state.feeds.all, payload.card);
     if ((payload.card.addresses || []).length) remember(state.feeds.ca, payload.card);

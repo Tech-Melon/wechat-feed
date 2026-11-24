@@ -59,9 +59,11 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.setenv("WECHAT_FEED_DISABLE_UPSTREAM", "1")
     monkeypatch.setenv("WECHAT_FEED_DISABLE_TOKEN", "1")
     monkeypatch.setenv("WECHAT_FEED_DISABLE_DIRECT", "1")
+    monkeypatch.setenv("WECHAT_FEED_DISABLE_OPEN", "1")
     from wechat_feed.server import create_app
 
-    with TestClient(create_app()) as test_client:
+    # 服务只认 127.0.0.1 / localhost 的 Host 头（防 DNS rebinding）。
+    with TestClient(create_app(), base_url="http://127.0.0.1:8765") as test_client:
         yield test_client
 
 

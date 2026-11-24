@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import copy
+import ipaddress
 import json
 import os
+import re
 import threading
 from pathlib import Path
 from typing import Any
@@ -12,6 +14,26 @@ from urllib.parse import urlsplit
 
 GROUP_LIMIT = 50
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost"}
+
+# 开放接口推进来的群/用户 ID：「平台:原始ID」。微信 ID 不含冒号，两边不会撞。
+OPEN_PLATFORM = re.compile(r"^[a-z][a-z0-9_-]{1,15}$")
+OPEN_RAW_ID = re.compile(r"^[A-Za-z0-9_.=+\-]{1,64}$")
+OPEN_ID = re.compile(r"^[a-z][a-z0-9_-]{1,15}:[A-Za-z0-9_.=+\-]{1,64}$")
+OPEN_KEY = re.compile(r"^wfo_[A-Za-z0-9_-]{32,64}$")
+OPEN_DEFAULT_PORT = 8766
+
+
+def is_open_id(value: str) -> bool:
+    return bool(OPEN_ID.match(str(value or "")))
+
+
+def wechat_groups(settings: dict[str, Any]) -> list[dict[str, str]]:
+    """监控群里属于微信的部分。开放接口的群不参与微信库的监听与回拉。"""
+    return [
+        item
+        for item in settings.get("groups") or []
+        if str(item.get("id") or "").endswith("@chatroom")
+    ]
 
 
 def project_root() -> Path:
@@ -49,6 +71,11 @@ def default_settings() -> dict[str, Any]:
         "gmgn_api_key": "",
         "mcap_format": "cn",
         "ca_board": True,
+        "open_api_enabled": False,
+        "open_api_key": "",
+        "open_api_host": "0.0.0.0",
+        "open_api_port": OPEN_DEFAULT_PORT,
+        "open_api_allow_ips": [],
     }
 
 
@@ -67,6 +94,8 @@ def validate_upstream_base(value: str) -> str:
 
 def validate_group_id(value: str) -> str:
     text = str(value or "").strip()
+    if is_open_id(text):
+        return text
     if len(text) < 12 or len(text) > 96 or not text.endswith("@chatroom"):
         raise ValueError("群 ID 需要是微信群会话，形如 12345678@chatroom")
     local = text[: -len("@chatroom")]
@@ -89,6 +118,53 @@ def _clean_id_list(value: Any, *, limit: int, label: str) -> list[str]:
         seen.add(group_id)
         cleaned.append(group_id)
     return cleaned
+
+
+def _clean_allow_ips(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        raise ValueError("开放接口 IP 白名单必须是数组")
+    if len(value) > 32:
+        raise ValueError("开放接口 IP 白名单最多 32 条")
+    cleaned: list[str] = []
+    for item in value:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        try:
+            network = ipaddress.ip_network(text, strict=False)
+        except ValueError as exc:
+            raise ValueError(f"IP 白名单格式不正确：{text[:40]}") from exc
+        if str(network) not in cleaned:
+            cleaned.append(str(network))
+    return cleaned
+
+
+def _clean_open_settings(raw: dict[str, Any], merged: dict[str, Any]) -> None:
+    if "open_api_enabled" in raw:
+        if not isinstance(raw["open_api_enabled"], bool):
+            raise ValueError("开放接口开关必须是布尔值")
+        merged["open_api_enabled"] = raw["open_api_enabled"]
+    if "open_api_key" in raw:
+        key = str(raw.get("open_api_key") or "").strip()
+        if key and not OPEN_KEY.match(key):
+            raise ValueError("开放接口密钥格式不正确")
+        merged["open_api_key"] = key
+    if "open_api_host" in raw:
+        host = str(raw.get("open_api_host") or "").strip() or "0.0.0.0"
+        try:
+            ipaddress.ip_address(host)
+        except ValueError as exc:
+            raise ValueError("开放接口监听地址必须是 IP，例如 0.0.0.0 或 192.168.1.5") from exc
+        merged["open_api_host"] = host
+    if "open_api_port" in raw:
+        port = raw.get("open_api_port")
+        if isinstance(port, bool) or not isinstance(port, int) or not 1024 <= port <= 65535:
+            raise ValueError("开放接口端口必须是 1024–65535 的整数")
+        if port == 8765:
+            raise ValueError("开放接口端口不能和本地页面 8765 相同")
+        merged["open_api_port"] = port
+    if "open_api_allow_ips" in raw:
+        merged["open_api_allow_ips"] = _clean_allow_ips(raw["open_api_allow_ips"])
 
 
 def _clean_user_list(value: Any, *, limit: int, label: str) -> list[str]:
@@ -233,6 +309,7 @@ def normalize_settings(raw: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(raw["ca_board"], bool):
             raise ValueError("CA 发现榜开关必须是布尔值")
         merged["ca_board"] = raw["ca_board"]
+    _clean_open_settings(raw, merged)
     # 旧版的日结算时刻：增量刷新后不再需要，读到就丢掉。
     merged.pop("ca_daily_hour", None)
     if "blocked_groups" in raw:
@@ -291,6 +368,11 @@ def normalize_settings(raw: dict[str, Any]) -> dict[str, Any]:
         "mcap_format",
         "ca_board",
         "ca_daily_hour",
+        "open_api_enabled",
+        "open_api_key",
+        "open_api_host",
+        "open_api_port",
+        "open_api_allow_ips",
     }
     if unknown:
         raise ValueError("含有不支持的配置项")

@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <title>开放接口 · 技术瓜群流</title>
+    <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/assets/gmgn.css?v=0.9.37" />
+    <style>
+      .op-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+      .op-key { font-family: ui-monospace, Consolas, monospace; font-size: 13px; padding: 8px 10px; border-radius: 10px; background: #fffaeb; border: 1px solid #fedf89; word-break: break-all; }
+      .op-code { font-family: ui-monospace, Consolas, monospace; font-size: 12px; background: #f8fafc; border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; white-space: pre-wrap; word-break: break-all; margin: 8px 0 0; }
+      .op-form textarea { font: inherit; font-size: 13px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 10px; background: #f8fafc; color: var(--ink); min-width: 260px; min-height: 54px; }
+      .op-check { display: flex !important; grid-auto-flow: column; align-items: center; gap: 6px !important; color: var(--ink) !important; font-size: 13px !important; }
+      .op-plat { display: inline-block; padding: 0 6px; border-radius: 4px; background: #667085; color: #fff; font-size: 11px; font-weight: 700; margin-right: 6px; }
+      .op-err { color: var(--bad); }
+    </style>
+  </head>
+  <body>
+    <header class="gm-top">
+      <a class="gm-back" href="/">← 返回群流</a>
+      <div class="gm-title">
+        <h1>开放接口</h1>
+        <p>让局域网里另一台电脑上的程序，把 Telegram / Discord / QQ 等平台的群消息推进本机信息流。每个请求都要用密钥签名。</p>
+      </div>
+      <span id="op-badge" class="gm-badge">读取中</span>
+    </header>
+
+    <main class="gm-main">
+      <section class="gm-card">
+        <header class="gm-card-head">
+          <h2>监听与访问控制</h2>
+          <p id="op-listen" class="gm-muted"></p>
+        </header>
+        <form id="op-form" class="dm-form op-form">
+          <label class="op-check"><input id="op-enabled" type="checkbox" /> 开启开放接口</label>
+          <label>监听地址
+            <input id="op-host" placeholder="0.0.0.0" size="16" />
+          </label>
+          <label>端口
+            <input id="op-port" type="number" min="1024" max="65535" placeholder="8766" />
+          </label>
+          <label>来源 IP 白名单（每行一个 IP 或网段，留空 = 只收局域网私有地址）
+            <textarea id="op-allow" placeholder="192.168.1.20&#10;192.168.1.0/24"></textarea>
+          </label>
+          <button type="submit">保存</button>
+        </form>
+        <p id="op-form-out" class="gm-hint" role="status" aria-live="polite"></p>
+        <p class="gm-hint">本地页和 /api/* 仍然只监听 127.0.0.1:8765，局域网端口上只有 /open/v1/*。第一次开启时 Windows 防火墙可能拦截，需要放行这个端口，命令见接入指南。</p>
+      </section>
+
+      <section class="gm-card">
+        <header class="gm-card-head">
+          <h2>密钥</h2>
+          <div class="op-row">
+            <button id="op-rotate" type="button" class="dm-btn">生成新密钥</button>
+            <button id="op-clear" type="button" class="dm-btn">清除密钥</button>
+          </div>
+        </header>
+        <p id="op-key-state" class="gm-muted"></p>
+        <div id="op-key-new" hidden>
+          <p class="gm-hint">新密钥只显示这一次，请马上复制到推送端。关掉页面后只能重新生成。</p>
+          <div class="op-row">
+            <code id="op-key-text" class="op-key"></code>
+            <button id="op-key-copy" type="button" class="dm-btn small">复制</button>
+          </div>
+        </div>
+        <p class="gm-hint">重新生成后旧密钥立即失效。密钥和 GMGN Key 一样保存在本机 data/settings.json，页面和接口都不会回显。</p>
+      </section>
+
+      <section class="gm-card">
+        <header class="gm-card-head">
+          <h2>接收统计（本次启动以来）</h2>
+          <p id="op-last" class="gm-muted"></p>
+        </header>
+        <div id="op-kpis" class="gm-kpis"></div>
+      </section>
+
+      <section class="gm-card">
+        <header class="gm-card-head">
+          <h2>推送过的群</h2>
+          <p class="gm-muted">新群默认不显示。加入监控后才会入库、出现在信息流里；在「群聊选择管理」里和微信群一样勾选、备注、只听部分人。</p>
+        </header>
+        <div class="gm-scroll">
+          <table class="gm-table">
+            <thead>
+              <tr><th>群</th><th>群 ID</th><th>消息数</th><th>最近推送</th><th>状态</th><th></th></tr>
+            </thead>
+            <tbody id="op-chats"></tbody>
+          </table>
+        </div>
+        <p id="op-chats-empty" class="gm-hint">还没有收到推送。</p>
+      </section>
+
+      <section class="gm-card">
+        <header class="gm-card-head">
+          <h2>签名速查</h2>
+        </header>
+        <pre id="op-sample" class="op-code"></pre>
+        <p class="gm-hint">完整说明见仓库 docs/开放接口.md，Python 示例见 scripts/open_push_example.py。</p>
+      </section>
+    </main>
+    <script src="/shared/feed.js?v=0.9.37"></script>
+    <script src="/assets/open.js?v=0.9.37"></script>
+  </body>
+</html>
